@@ -1,0 +1,41 @@
+@import '@fontsource-variable/inter';
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root, [data-theme='light'] {
+  --bg: 250 246 238; --surface: 255 255 255; --surface-2: 247 241 230; --line: 236 227 210;
+  --ink: 43 33 20; --muted: 115 101 80; --subtle: 163 149 127;
+  --accent: 156 110 30; --accent-soft: 249 239 216; --accent-ink: 255 255 255;
+  --ok: 21 128 61; --ok-soft: 230 244 234; --warn: 194 94 12; --warn-soft: 254 240 218; --bad: 180 35 24; --bad-soft: 253 236 234;
+  --nav: 255 253 249; --nav-line: 236 227 210; --nav-ink: 43 33 20; --nav-muted: 125 110 88;
+  color-scheme: light;
+}
+[data-theme='dark'] {
+  --bg: 22 18 12; --surface: 33 27 19; --surface-2: 42 35 25; --line: 62 52 36;
+  --ink: 245 237 223; --muted: 192 178 154; --subtle: 140 126 102;
+  --accent: 214 163 72; --accent-soft: 62 48 24; --accent-ink: 30 21 8;
+  --ok: 74 222 128; --ok-soft: 18 52 36; --warn: 251 168 60; --warn-soft: 66 44 14; --bad: 248 113 113; --bad-soft: 66 26 26;
+  --nav: 17 13 8; --nav-line: 46 38 26; --nav-ink: 245 237 223; --nav-muted: 150 135 110;
+  color-scheme: dark;
+}
+
+html, body, #root { height: 100%; }
+body { margin: 0; background: rgb(var(--bg)); color: rgb(var(--ink)); font-family: 'Inter Variable', Inter, 'Segoe UI', system-ui, sans-serif; font-size: 14px; line-height: 1.45; -webkit-font-smoothing: antialiased; }
+* { box-sizing: border-box; }
+button, input, select, textarea { font: inherit; color: inherit; }
+::selection { background: rgb(var(--accent) / .22); }
+
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb { background: rgb(var(--line)); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+*::-webkit-scrollbar-thumb:hover { background: rgb(var(--subtle) / .6); background-clip: content-box; border: 2px solid transparent; }
+
+:focus-visible { outline: 2px solid rgb(var(--accent)); outline-offset: 2px; border-radius: 6px; }
+.drag { -webkit-app-region: drag; }
+.no-drag { -webkit-app-region: no-drag; }
+
+@layer components {
+  .field { @apply w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink placeholder:text-subtle shadow-sm transition focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25; }
+  .th { @apply px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-subtle; }
+}
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }

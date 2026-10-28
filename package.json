@@ -1,0 +1,133 @@
+{
+  "name": "koolmate",
+  "productName": "KoolMate",
+  "version": "1.0.0",
+  "description": "KoolMate \u2014 AI file assistant. Find any file by describing it and file new downloads where they belong.",
+  "author": "KoolMate Team",
+  "license": "MIT",
+  "main": "electron/main.js",
+  "homepage": "https://github.com/Indalu616/Koolmate",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Indalu616/Koolmate.git"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "start": "vite build && electron .",
+    "electron:dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && cross-env KOOLMATE_DEV=1 electron .\"",
+    "test": "node --test --test-force-exit tests/*.test.js",
+    "dist": "vite build && electron-builder --win --publish never",
+    "dist:dir": "vite build && electron-builder --dir --publish never",
+    "dist:mac": "vite build && electron-builder --mac --publish never",
+    "dist:all": "vite build && electron-builder --win --mac --publish never"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "^5.1.0",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.460.0",
+    "pdfjs-dist": "^4.10.38",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.15",
+    "vite": "^5.4.11",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.koolmate.app",
+    "productName": "KoolMate",
+    "copyright": "Copyright \u00a9 2026 KoolMate",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "publisherName": "KoolMate",
+      "artifactName": "KoolMate-${version}-win-x64.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "KoolMate",
+      "uninstallDisplayName": "KoolMate",
+      "artifactName": "KoolMate-Setup-${version}.${ext}"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.png",
+      "artifactName": "KoolMate-${version}-mac-${arch}.${ext}",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "identity": null,
+      "extendInfo": {
+        "LSUIElement": false
+      }
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Utility"
+    },
+    "portable": {
+      "artifactName": "KoolMate-Portable-${version}.${ext}"
+    },
+    "dmg": {
+      "title": "KoolMate ${version}",
+      "artifactName": "KoolMate-${version}-mac-${arch}.${ext}"
+    }
+  }
+}
