@@ -4,7 +4,7 @@ const path = require('path')
 const { uid } = require('./common')
 
 const WIN_BLOCK = ['c:\\windows', 'c:\\program files', 'c:\\program files (x86)', 'c:\\programdata', 'c:\\system volume information', 'c:\\$recycle.bin']
-const POSIX_BLOCK = ['/etc', '/usr', '/bin', '/sbin', '/boot', '/sys', '/proc', '/dev', '/lib', '/var']
+const POSIX_BLOCK = ['/etc', '/usr', '/bin', '/sbin', '/boot', '/sys', '/proc', '/dev', '/lib', '/var/lib', '/var/log', '/var/spool', '/var/run', '/System', '/Library', '/private/etc']
 
 function assertSafeDestination(dir) {
   if (!dir || typeof dir !== 'string') throw new Error('No destination folder was provided.')
