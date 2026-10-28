@@ -53,19 +53,12 @@ jobs:
           name: KoolMate-${{ matrix.name }}
           path: ${{ matrix.files }}
 
-  release:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist-artifacts
-          merge-multiple: true
-
+      # Each platform publishes its own files as soon as it finishes, so the release
+      # shows Windows first and the Mac files are added when that job completes.
       - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           name: KoolMate ${{ github.ref_name }}
           generate_release_notes: true
-          files: dist-artifacts/*
+          files: ${{ matrix.files }}
