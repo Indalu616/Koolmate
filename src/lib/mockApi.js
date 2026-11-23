@@ -110,7 +110,52 @@ export function createMockApi() {
     },
     index: { status: async () => ({ state: 'ready', count: 18432, roots: ['/Users/demo'] }), rebuild: async () => { await task('index', [['scan', '6,120 files'], ['scan', '12,904 files'], ['scan', '18,432 files']], 450); return { state: 'ready', count: 18432 } } },
     files: { open: async () => {}, reveal: async () => {} },
-    dialog: { pickFolder: async () => '/Users/demo/Documents/Chosen Folder' },
+    dialog: { pickFolder: async () => '/Users/demo/Documents/Chosen Folder', pickFile: async () => `${H}/CSC308 Operating Systems/Lectures/CSC308_Lecture03_Process_Scheduling.pdf` },
+    study: (() => {
+      let plan = null
+      const lessonFor = (t, mode) => ({
+        explanation: mode === 'simpler'
+          ? `Think of ${t} like a queue at a coffee shop: everyone gets served in turn, and nobody can be forgotten.`
+          : mode === 'deeper'
+            ? `${t} matters because the operating system must share one CPU between many programs. Under the hood it relies on timer interrupts and a ready queue, and the trade-off is responsiveness against context-switch overhead.`
+            : `${t} is how the operating system decides which process runs next and for how long. A good policy keeps the CPU busy while keeping every program responsive.`,
+        example: 'Three processes arrive: P1 needs 5 ms, P2 needs 3 ms, P3 needs 8 ms. With a 4 ms time slice, P1 runs 4 ms, P2 finishes in 3 ms, P3 runs 4 ms, and then P1 finishes its last 1 ms.',
+        checkQuestion: `What problem does ${t} solve, and what does it cost?`,
+        checkAnswer: 'It shares the CPU fairly between processes; the cost is extra context switches and some waiting for long jobs.'
+      })
+      const mk = () => ({
+        id: 'p1', file: { path: `${H}/CSC308 Operating Systems/Lectures/CSC308_Lecture03_Process_Scheduling.pdf`, name: 'CSC308_Lecture03_Process_Scheduling.pdf', size: 3_100_000, mtime: now }, title: 'Process Scheduling', model: 'qwen3:8b', createdAt: now, sections: 7, truncated: false,
+        objectives: ['Explain why an operating system needs a CPU scheduler', 'Compare FCFS, shortest job first and round robin', 'Calculate waiting and turnaround time for a set of processes', 'Choose a time slice and justify the trade-off'],
+        progress: { done: 0, total: 5 },
+        concepts: [
+          ['CPU scheduling', 'high', [], 'Slides 2–5'], ['Process states', 'medium', [], 'Slides 6–8'], ['FCFS and SJF', 'high', ['CPU scheduling'], 'Slides 9–14'], ['Round robin', 'high', ['CPU scheduling'], 'Slides 15–19'], ['Context switching', 'low', ['Process states'], 'Slides 20–22']
+        ].map(([title, importance, pre, source], i) => ({ id: 'c' + (i + 1), title, importance, source, done: false, lessons: {}, prerequisites: pre.map(t => ({ id: 'x', title: t })) }))
+      })
+      const typeJson = async (scope, extra, obj, step = 18) => {
+        emit('study:stream', { scope, ...extra, phase: 'thinking', text: '' })
+        await wait(900)
+        const full = JSON.stringify(obj)
+        for (let i = 12; i <= full.length + 12; i += 12) { emit('study:stream', { scope, ...extra, phase: 'writing', text: full.slice(0, i) }); await wait(step) }
+      }
+      return {
+        status: async () => ({ ready: true, provider: 'gemini', running: true, url: 'http://127.0.0.1:11434', model: 'qwen3:8b', hasModel: true, models: ['qwen3:8b'], pullCommand: 'ollama pull qwen3:8b' }),
+        open: async () => {
+          plan = plan || mk()
+          await task('study', [['read', 'CSC308_Lecture03_Process_Scheduling.pdf'], ['sections', 'Read 1 of 4 sections'], ['sections', 'Read 3 of 4 sections']], 500)
+          emit('task:progress', { kind: 'study', step: 'objectives', pct: 66, detail: null })
+          await typeJson('build', { step: 'objectives' }, { title: plan.title, objectives: plan.objectives })
+          emit('task:progress', { kind: 'study', step: 'concepts', pct: 80, detail: null })
+          await typeJson('build', { step: 'concepts' }, { concepts: plan.concepts.map(c => ({ title: c.title })) }, 25)
+          emit('task:progress', { kind: 'study', step: 'plan', pct: 94, detail: null }); await wait(400)
+          return { plan, cached: false }
+        },
+        lesson: async ({ conceptId, mode }) => { const c = plan.concepts.find(x => x.id === conceptId); const l = lessonFor(c.title, mode); await typeJson('lesson', { conceptId, mode }, l, 22); c.lessons = { ...c.lessons, [mode]: l }; return l },
+        done: async ({ conceptId, done }) => { plan.concepts.find(x => x.id === conceptId).done = done; plan.progress = { done: plan.concepts.filter(c => c.done).length, total: plan.concepts.length }; return plan.progress },
+        ask: async ({ question }) => { const a = { answer: `According to the slides, this happens because of how the scheduler orders the ready queue. (Mock answer to “${question}”.)`, found: true }; await typeJson('ask', {}, a, 25); return { answer: `According to the slides, this happens because of how the scheduler orders the ready queue. (Mock answer to “${question}”.)`, found: true, sources: ['Slides 9–14', 'Slides 15–19'] } },
+        recent: async () => (plan ? [{ id: 'p1', title: plan.title, file: plan.file, progress: plan.progress, lastOpened: now, exists: true }] : []),
+        load: async () => plan, remove: async () => {}
+      }
+    })(),
     suggestions: {
       list: async () => suggestions.filter(s => s.status === 'pending'),
       accept: async (id, folder) => {

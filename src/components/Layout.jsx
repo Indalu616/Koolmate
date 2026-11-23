@@ -1,6 +1,6 @@
 import React from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
-import { Sparkles, ScanSearch, DownloadCloud, History, Settings as SettingsIcon, RefreshCw } from 'lucide-react'
+import { Sparkles, ScanSearch, DownloadCloud, History, GraduationCap, Settings as SettingsIcon, RefreshCw } from 'lucide-react'
 import { useApp } from '../state/AppContext'
 import { useProcess } from '../state/Process'
 import { api } from '../lib/bridge'
@@ -9,6 +9,7 @@ import { cx } from './ui'
 const NAV = [
   { to: '/', label: 'Assistant', icon: Sparkles, end: true },
   { to: '/sort', label: 'Sort', icon: ScanSearch },
+  { to: '/study', label: 'Study', icon: GraduationCap },
   { to: '/downloads', label: 'Downloads', icon: DownloadCloud, badge: true },
   { to: '/activity', label: 'Activity', icon: History },
   { to: '/settings', label: 'Settings', icon: SettingsIcon }

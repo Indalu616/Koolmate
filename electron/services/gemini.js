@@ -33,11 +33,81 @@ async function generateJson({ apiKey, model, prompt, timeoutMs = 12000, image = 
   }
 }
 
+/** Study Buddy: system + user prompt, JSON answer shaped by `schema`; retries once on rate limits. */
+async function chatJson({ apiKey, model, system, prompt, schema, maxTokens = 8192, timeoutMs = 120000, onStream }) {
+  if (!apiKey) throw new Error('No Gemini API key configured.')
+  const text = schema ? `${prompt}\n\nReturn ONLY JSON matching this JSON schema:\n${JSON.stringify(schema)}` : prompt
+  // Thinking tokens count against the output budget and can leave an empty answer: keep thinking small.
+  let thinking = /gemini-3/i.test(model) ? { thinkingLevel: 'low' } : /2\.5-flash/i.test(model) ? { thinkingBudget: 0 } : null
+  let budget = Math.max(maxTokens, 4096)
+  let lastReason = ''
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+    try {
+      const res = await fetch(`${ENDPOINT}/${encodeURIComponent(model)}:${onStream ? 'streamGenerateContent?alt=sse' : 'generateContent'}`, {
+        method: 'POST', signal: ctrl.signal,
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+        body: JSON.stringify({
+          ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
+          contents: [{ role: 'user', parts: [{ text }] }],
+          generationConfig: { temperature: 0.3, maxOutputTokens: budget, responseMimeType: 'application/json', ...(thinking ? { thinkingConfig: thinking } : {}) }
+        })
+      })
+      if (res.status === 429 || res.status >= 500) { await new Promise(r => setTimeout(r, 1500 * (attempt + 1))); continue }
+      if (!res.ok) {
+        let detail = ''
+        try { detail = (await res.json())?.error?.message || '' } catch { /* ignore */ }
+        if (res.status === 400 && thinking && /think/i.test(detail)) { thinking = null; continue }
+        throw new Error(`Gemini returned ${res.status}${detail ? `: ${detail}` : ''}`)
+      }
+      let cand, out = '', blocked = '', body = null
+      if (onStream && res.body) {
+        onStream({ phase: 'thinking', text: '' })
+        const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = ''
+        for (;;) {
+          const { done, value } = await reader.read()
+          const last = done
+          if (last) buf += '\n'
+          else buf += dec.decode(value, { stream: true })
+          let i
+          while ((i = buf.indexOf('\n')) >= 0) {
+            const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1)
+            if (!line.startsWith('data:')) continue
+            let j; try { j = JSON.parse(line.slice(5)) } catch { continue }
+            blocked = j.promptFeedback?.blockReason || blocked
+            const c = j.candidates?.[0]
+            if (!c) continue
+            cand = { ...cand, finishReason: c.finishReason || cand?.finishReason }
+            const piece = (c.content?.parts || []).filter(p => !p.thought).map(p => p.text || '').join('')
+            if (piece) { out += piece; onStream({ phase: 'writing', text: out }) }
+          }
+          if (last) break
+        }
+        if (blocked && !cand) cand = { finishReason: blocked }
+      } else {
+        body = await res.json()
+        cand = body?.candidates?.[0]
+        out = cand?.content?.parts?.filter(p => !p.thought).map(p => p.text || '').join('') || ''
+      }
+      lastReason = cand?.finishReason || (body?.promptFeedback?.blockReason || blocked) || 'EMPTY'
+      try { return parseJsonLoose(out) } catch {
+        if (lastReason === 'MAX_TOKENS') budget = Math.min(budget * 2, 32768)
+        continue // empty/truncated/garbled: try again
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') throw new Error('Gemini took too long to answer.')
+      throw e
+    } finally { clearTimeout(timer) }
+  }
+  throw new Error(`Gemini did not return a usable answer (${lastReason}). Try again or choose another model in Settings.`)
+}
+
 function parseJsonLoose(text) {
   const cleaned = String(text).replace(/```json|```/gi, '').trim()
   try { return JSON.parse(cleaned) } catch { /* try to find the first JSON object */ }
   const m = cleaned.match(/\{[\s\S]*\}/)
-  if (m) return JSON.parse(m[0])
+  if (m) { try { return JSON.parse(m[0]) } catch { /* fall through */ } }
   throw new Error('Gemini returned an unreadable response.')
 }
 
@@ -121,4 +191,4 @@ async function testKey({ apiKey, model }) {
   return r && r.ok === true
 }
 
-module.exports = { planQueryAI, pickFolderAI, analyzeFileAI, testKey, parseJsonLoose, queryPrompt, folderPrompt }
+module.exports = { chatJson, planQueryAI, pickFolderAI, analyzeFileAI, testKey, parseJsonLoose, queryPrompt, folderPrompt }

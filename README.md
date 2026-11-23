@@ -101,3 +101,20 @@ There is no database and no server: settings, the undo journal and learned prefe
 ## License
 
 MIT
+
+## Study Buddy (local AI with Ollama)
+
+Open a lecture, slides or notes and Study Buddy reads the whole file section by section, then gives you:
+
+- **After this you can…** learning objectives,
+- a **concept checklist** (importance, prerequisites, where in the file it comes from, saved progress),
+- a **lesson per concept**: explanation, a worked example (labelled AI-written) and a check question, with *Simpler* and *Go deeper* buttons,
+- **Ask about this file**, answered only from the file with the pages or slides to look at.
+
+It runs on your computer through [Ollama](https://ollama.com); nothing is uploaded.
+
+```bash
+ollama pull qwen3:8b     # or qwen3:4b on computers with 8 GB of memory or less
+```
+
+Start it from the **Study** tab, from the study icon on a search result, or by asking the Assistant: *"open OS lecture 6 and help me study"*. Plans are cached, so reopening a file is instant. The address and model are in Settings. Without Ollama, the rest of KoolMate keeps working.

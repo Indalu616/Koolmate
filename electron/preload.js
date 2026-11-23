@@ -1,7 +1,7 @@
 'use strict'
 const { contextBridge, ipcRenderer } = require('electron')
 
-const EVENTS = new Set(['suggestions:changed', 'index:progress', 'activity:changed', 'popup:show', 'navigate', 'settings:changed', 'task:progress'])
+const EVENTS = new Set(['suggestions:changed', 'index:progress', 'activity:changed', 'popup:show', 'navigate', 'settings:changed', 'task:progress', 'study:stream'])
 
 async function call(channel, ...args) {
   const res = await ipcRenderer.invoke(channel, ...args)
@@ -17,7 +17,12 @@ contextBridge.exposeInMainWorld('koolmate', {
   search: text => call('search:run', text),
   index: { status: () => call('index:status'), rebuild: () => call('index:rebuild') },
   files: { open: p => call('file:open', p), reveal: p => call('file:reveal', p) },
-  dialog: { pickFolder: title => call('dialog:pick-folder', title) },
+  dialog: { pickFolder: title => call('dialog:pick-folder', title), pickFile: title => call('dialog:pick-file', title) },
+  study: {
+    status: () => call('study:status'), open: req => call('study:open', req), lesson: req => call('study:lesson', req),
+    done: req => call('study:done', req), ask: req => call('study:ask', req), recent: () => call('study:recent'),
+    load: id => call('study:load', id), remove: id => call('study:remove', id)
+  },
   suggestions: {
     list: () => call('suggestions:list'),
     accept: (id, folder) => call('suggestions:accept', id, folder),

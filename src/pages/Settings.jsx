@@ -104,6 +104,38 @@ function AiSection() {
   )
 }
 
+function StudySection() {
+  const { settings, updateSettings, toast, fail } = useApp()
+  const [url, setUrl] = useState(settings.ollamaUrl || '')
+  const [model, setModel] = useState(settings.ollamaModel || '')
+  const [status, setStatus] = useState(null)
+  const [checking, setChecking] = useState(false)
+  const dirty = url !== settings.ollamaUrl || model !== settings.ollamaModel
+  useEffect(() => { setUrl(settings.ollamaUrl || ''); setModel(settings.ollamaModel || '') }, [settings.ollamaUrl, settings.ollamaModel])
+  const check = async () => { setChecking(true); try { setStatus(await api.study.status()) } catch (e) { fail(e) } finally { setChecking(false) } }
+  useEffect(() => { check() }, [settings.ollamaUrl, settings.ollamaModel]) // eslint-disable-line react-hooks/exhaustive-deps
+  const save = async () => { await updateSettings({ ollamaUrl: url.trim() || 'http://127.0.0.1:11434', ollamaModel: model.trim() || 'qwen3:8b' }); toast('Study Buddy settings saved.', { type: 'success' }) }
+  const state = !status ? ['neutral', 'Checking'] : !status.running ? ['neutral', 'Ollama not running'] : !status.hasModel ? ['warn', 'Model missing'] : ['ok', 'Ready']
+  return (
+    <Card>
+      <CardHeader title="Study Buddy" action={<Badge tone={state[0]} icon={state[0] === 'ok' ? CheckCircle2 : undefined}>{state[1]}</Badge>} />
+      <div className="space-y-4 px-5 py-4">
+        <div>
+          <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-subtle">Study Buddy uses</label>
+          <Segmented value={settings.studyProvider || 'auto'} onChange={v => updateSettings({ studyProvider: v })} options={[{ value: 'auto', label: 'Automatic' }, { value: 'gemini', label: 'Gemini' }, { value: 'ollama', label: 'Ollama (private)' }]} />
+          <p className="mt-1.5 text-[12px] text-muted">Automatic uses Gemini when a key is saved, otherwise Ollama.</p>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-[1fr_220px]">
+          <div><label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-subtle">Ollama address</label><input className="field font-mono" value={url} onChange={e => setUrl(e.target.value)} spellCheck={false} /></div>
+          <div><label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-subtle">Model</label><input className="field font-mono" value={model} onChange={e => setModel(e.target.value)} spellCheck={false} list="ollama-models" /><datalist id="ollama-models">{(status?.models || []).map(m => <option key={m} value={m} />)}</datalist></div>
+        </div>
+        <div className="flex items-center gap-2.5 rounded-lg bg-accent-soft px-3.5 py-2.5 text-[13px] text-ink"><ShieldCheck size={16} className="shrink-0 text-accent" /><span>Runs entirely on this computer. Use qwen3:8b normally, or qwen3:4b if memory is tight.</span></div>
+        <div className="flex justify-end gap-2"><Button icon={Wand2} loading={checking} onClick={check}>Check</Button><Button variant="primary" disabled={!dirty} onClick={save}>Save</Button></div>
+      </div>
+    </Card>
+  )
+}
+
 export default function Settings() {
   const { settings, updateSettings, info, toast, fail } = useApp()
   const { run } = useProcess()
@@ -152,6 +184,7 @@ export default function Settings() {
       </Card>
 
       <AiSection />
+      <StudySection />
 
       <Card>
         <CardHeader title="Appearance" />

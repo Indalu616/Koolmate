@@ -7,6 +7,7 @@ import Assistant from './pages/Assistant'
 import Downloads from './pages/Downloads'
 import Activity from './pages/Activity'
 import Sort from './pages/Sort'
+import Study from './pages/Study'
 import Settings from './pages/Settings'
 import Popup from './pages/Popup'
 
@@ -18,6 +19,7 @@ export default function App() {
         <Route element={<AppProvider><ProcessProvider><Layout /></ProcessProvider></AppProvider>}>
           <Route index element={<Assistant />} />
           <Route path="sort" element={<Sort />} />
+          <Route path="study" element={<Study />} />
           <Route path="downloads" element={<Downloads />} />
           <Route path="activity" element={<Activity />} />
           <Route path="settings" element={<Settings />} />

@@ -17,11 +17,14 @@ const gemini = require('./gemini')
 const smart = require('./smartSort')
 const { readExcerpt, IMAGE_EXT } = require('./contentReader')
 const demo = require('./demo')
+const { createOllama } = require('./ollama')
+const { createStudy } = require('./study')
+const { readSections } = require('./contentReader')
 const { uid, extOf, isInside, isTempName, SKIP_DIR_NAMES } = require('./common')
 
 function createCore({ store, hooks = {}, documentsDir }) {
   const noop = () => {}
-  const h = { onSuggestions: noop, onNewSuggestion: noop, onAutoMoved: noop, onIndex: noop, onTask: noop, onActivity: noop, onWatchError: noop, ...hooks }
+  const h = { onSuggestions: noop, onNewSuggestion: noop, onAutoMoved: noop, onIndex: noop, onTask: noop, onStudyStream: noop, onActivity: noop, onWatchError: noop, ...hooks }
 
   const settings = () => store.getSettings()
   const indexer = new Indexer({ getRoots: () => settings().searchRoots, getExcluded: () => settings().excludedFolders })
@@ -457,7 +460,32 @@ function createCore({ store, hooks = {}, documentsDir }) {
     return r
   }
 
+  // ------------------------------------------------------------- study buddy (local Ollama)
+  const ollama = createOllama({ getConfig: () => ({ url: settings().ollamaUrl, model: settings().ollamaModel }), fetchImpl: hooks.fetch || globalThis.fetch })
+  // Study Buddy uses Gemini when a key is set (fast, parallel), otherwise the local Ollama model.
+  const useGemini = () => { const p = settings().studyProvider; return p === 'gemini' ? !!settings().geminiApiKey : p === 'ollama' ? false : !!settings().geminiApiKey }
+  const studyAi = {
+    concurrency: () => (useGemini() ? 4 : 1),
+    config: () => (useGemini() ? { model: settings().geminiModel, provider: 'gemini' } : { ...ollama.config(), provider: 'ollama' }),
+    chat: opts => useGemini()
+      ? gemini.chatJson({ apiKey: settings().geminiApiKey, model: settings().geminiModel, system: opts.system, prompt: opts.messages.map(m => m.content).join('\n\n'), schema: opts.schema, maxTokens: 8192 })
+      : ollama.chat(opts)
+  }
+  const study = createStudy({ ollama: studyAi, readSections, dir: store.dir, task, stream: e => h.onStudyStream(e) })
+
   return {
+    studyStatus: async () => {
+      if (useGemini()) return { ready: true, provider: 'gemini', model: settings().geminiModel, running: true, hasModel: true, models: [], url: '', pullCommand: '' }
+      const st = await ollama.status()
+      return { ...st, provider: 'ollama', ready: st.running && st.hasModel }
+    },
+    studyOpen: ({ path: file, force } = {}) => study.build(file, { force }),
+    studyLesson: ({ planId, conceptId, mode, force }) => study.lesson(planId, conceptId, mode, { force }),
+    studyDone: ({ planId, conceptId, done }) => study.setDone(planId, conceptId, done),
+    studyAsk: ({ planId, question }) => study.ask(planId, question),
+    studyRecent: () => study.recent(),
+    studyLoad: id => study.load(id),
+    studyRemove: id => study.remove(id),
     start, close: () => watcher.close(),
     settings, updateSettings,
     search, organizePreview, organizeExecute, sortScan, sortExecute,

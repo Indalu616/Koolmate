@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, ScanSearch, Search, RefreshCw, FolderTree, Sparkles, DownloadCloud, Undo2, FlaskConical, FolderInput } from 'lucide-react'
+import { Check, ScanSearch, Search, RefreshCw, FolderTree, Sparkles, DownloadCloud, Undo2, FlaskConical, FolderInput, GraduationCap, BookOpenCheck } from 'lucide-react'
 import { api } from '../lib/bridge'
 import { cx } from '../components/ui'
 
@@ -18,6 +18,8 @@ const KINDS = {
   undo:     { title: 'Restoring files', icon: Undo2, steps: [['restore', 'Moving back'], ['save', 'Updating history']] },
   ai:       { title: 'Testing AI', icon: Sparkles, steps: [['connect', 'Connecting'], ['verify', 'Verifying key']] },
   simulate: { title: 'Simulating download', icon: DownloadCloud, steps: [['create', 'Downloading file'], ['detect', 'Detecting file'], ['analyze', 'Finding a folder']] },
+  study:    { title: 'Building study plan', icon: GraduationCap, steps: [['read', 'Opening file'], ['sections', 'Reading sections'], ['objectives', 'Writing objectives'], ['concepts', 'Finding key concepts'], ['plan', 'Building plan']] },
+  lesson:   { title: 'Preparing lesson', icon: BookOpenCheck, steps: [['lesson', 'Writing explanation and example']] },
   demo:     { title: 'Loading demo', icon: FlaskConical, steps: [['files', 'Creating sample files'], ['settings', 'Applying settings'], ['index', 'Indexing']] }
 }
 
@@ -49,7 +51,8 @@ export function ProcessProvider({ children }) {
   // Slow creep so the bar never looks frozen while a step is working.
   useEffect(() => {
     if (!t || t.state !== 'run') return
-    const id = setInterval(() => setT(p => (p && p.state === 'run' && p.pct < 92 ? { ...p, pct: p.pct + (92 - p.pct) * 0.04 } : p)), 160)
+    const cap = t.kind === 'study' || t.kind === 'lesson' ? 6 : 92 // real progress drives these
+    const id = setInterval(() => setT(p => (p && p.state === 'run' && p.pct < cap ? { ...p, pct: p.pct + (cap - p.pct) * 0.04 } : p)), 160)
     return () => clearInterval(id)
   }, [t?.kind, t?.state])
 

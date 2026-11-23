@@ -170,6 +170,22 @@ function registerIpc(refreshTray) {
     const r = await dialog.showOpenDialog(parent, { title: title || 'Select a folder', properties: ['openDirectory', 'createDirectory'] })
     return r.canceled ? null : r.filePaths[0]
   })
+  handle('dialog:pick-file', async title => {
+    const parent = mainWindow && mainWindow.isVisible() ? mainWindow : undefined
+    const r = await dialog.showOpenDialog(parent, {
+      title: title || 'Choose a file to study', properties: ['openFile'],
+      filters: [{ name: 'Study material', extensions: ['pdf', 'pptx', 'docx', 'odt', 'txt', 'md', 'rtf', 'html'] }, { name: 'All files', extensions: ['*'] }]
+    })
+    return r.canceled ? null : r.filePaths[0]
+  })
+  handle('study:status', () => core.studyStatus())
+  handle('study:open', req => core.studyOpen({ path: absoluteExisting(req && req.path), force: !!(req && req.force) }))
+  handle('study:lesson', req => core.studyLesson(req || {}))
+  handle('study:done', req => core.studyDone(req || {}))
+  handle('study:ask', req => core.studyAsk(req || {}))
+  handle('study:recent', () => core.studyRecent())
+  handle('study:load', id => core.studyLoad(String(id || '')))
+  handle('study:remove', id => core.studyRemove(String(id || '')))
   handle('suggestions:list', () => core.listSuggestions())
   handle('suggestions:accept', async (id, folder) => { const e = await core.acceptSuggestion(id, folder); refreshTray(); return e })
   handle('suggestions:dismiss', id => { core.dismissSuggestion(id); refreshTray() })
@@ -226,6 +242,7 @@ app.whenReady().then(() => {
       },
       onIndex: s => send(mainWindow, 'index:progress', s),
       onTask: e => send(mainWindow, 'task:progress', e),
+      onStudyStream: e => send(mainWindow, 'study:stream', e),
       onActivity: list => broadcast('activity:changed', list),
       onWatchError: e => console.error('Watcher error:', e.folder, e.error?.message)
     }

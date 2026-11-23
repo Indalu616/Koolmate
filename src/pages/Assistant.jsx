@@ -1,5 +1,6 @@
+import { useNavigate } from 'react-router-dom'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Sparkles, Search, ExternalLink, FolderSearch, FolderTree, ArrowRight, CalendarClock, FileType2, BookOpen, Tag, Cpu, Wand2, X } from 'lucide-react'
+import { GraduationCap, Sparkles, Search, ExternalLink, FolderSearch, FolderTree, ArrowRight, CalendarClock, FileType2, BookOpen, Tag, Cpu, Wand2, X } from 'lucide-react'
 import { api } from '../lib/bridge'
 import { useApp } from '../state/AppContext'
 import { useProcess } from '../state/Process'
@@ -122,6 +123,9 @@ function OrganizeModal({ open, onClose, selectedPaths, query, onDone }) {
   )
 }
 
+const STUDY_RE = /\b(?:and\s+)?(?:please\s+)?(?:help me|let'?s|i want to|i need to|i'd like to)\s+(?:study|learn|revise|review)(?:\s+(?:this|it|with me))?\b|\bteach me\b|\bstudy with me\b|^\s*study\b/i
+const STUDY_EXT = new Set(['pdf', 'pptx', 'docx', 'odt', 'txt', 'md', 'rtf', 'html'])
+
 export default function Assistant() {
   const { index, settings, fail } = useApp()
   const { run: runTask } = useProcess()
@@ -132,6 +136,7 @@ export default function Assistant() {
   const [selected, setSelected] = useState(new Set())
   const [organizeOpen, setOrganizeOpen] = useState(false)
   const inputRef = useRef(null)
+  const navigate = useNavigate()
 
   useEffect(() => {
     const onKey = e => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); inputRef.current?.focus(); inputRef.current?.select() } }
@@ -144,9 +149,13 @@ export default function Assistant() {
     const q = (text ?? query).trim()
     if (!q) return
     setQuery(q); setLoading(true); setLastQuery(q)
+    const studyIntent = STUDY_RE.test(q)
+    const searchText = studyIntent ? (q.replace(new RegExp(STUDY_RE.source, 'gi'), ' ').replace(/\bopen\b/gi, ' ').replace(/\s+/g, ' ').trim() || q) : q
     try {
-      const r = quiet === true ? await api.search(q) : await runTask('search', () => api.search(q), { detail: q, hold: 350, doneText: x => `${x.total} found` })
+      const r = quiet === true ? await api.search(searchText) : await runTask('search', () => api.search(searchText), { detail: searchText, hold: 350, doneText: x => `${x.total} found` })
       setRes(r)
+      const top = studyIntent && r.results.find(f => STUDY_EXT.has(f.ext))
+      if (top) { navigate(`/study?path=${encodeURIComponent(top.path)}`); return }
       setSelected(r.plan.intent === 'organize' ? new Set(r.results.map(f => f.path)) : new Set())
     } catch (e) { fail(e) } finally { setLoading(false) }
   }, [query, fail, runTask])
@@ -239,6 +248,7 @@ export default function Assistant() {
                           <td className="px-4 py-3 text-[13px] text-muted">{formatBytes(f.size)}</td>
                           <td className="px-3 py-3">
                             <div className="flex justify-end gap-0.5 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
+                              {STUDY_EXT.has(f.ext) && <IconButton icon={GraduationCap} label="Study this file" onClick={() => navigate(`/study?path=${encodeURIComponent(f.path)}`)} />}
                               <IconButton icon={ExternalLink} label="Open file" onClick={() => api.files.open(f.path).catch(fail)} />
                               <IconButton icon={FolderSearch} label="Show in folder" onClick={() => api.files.reveal(f.path).catch(fail)} />
                             </div>

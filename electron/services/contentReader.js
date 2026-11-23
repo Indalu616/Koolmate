@@ -114,4 +114,98 @@ async function readExcerpt(file, { maxChars = 4000 } = {}) {
   }
 }
 
-module.exports = { readExcerpt, rawPdfText, IMAGE_EXT }
+
+// ---------------------------------------------------------------- full document, by section (Study Buddy)
+
+const MAX_STUDY_PAGES = 300
+
+/** Splits long plain text into labelled parts on blank lines / headings, aiming for ~`size` chars. */
+function splitText(text, label, size = 3500) {
+  const paras = text.split(/\n{2,}|\r\n\r\n/).map(x => x.trim()).filter(Boolean)
+  const out = []
+  let cur = ''
+  for (const p of paras) {
+    if (cur && cur.length + p.length > size) { out.push(cur); cur = '' }
+    cur += (cur ? '\n\n' : '') + p
+    while (cur.length > size * 1.6) { out.push(cur.slice(0, size)); cur = cur.slice(size) }
+  }
+  if (cur) out.push(cur)
+  return out.map((t, i) => ({ label: out.length > 1 ? `${label} ${i + 1}` : label, text: t }))
+}
+
+async function pdfPages(file) {
+  const buf = await fs.promises.readFile(file)
+  const pdfjs = await loadPdfjs()
+  const task = pdfjs.getDocument({ data: new Uint8Array(buf), verbosity: 0, disableFontFace: true, isEvalSupported: false, useSystemFonts: false })
+  const doc = await Promise.race([task.promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 15000))])
+  const pages = []
+  try {
+    for (let i = 1; i <= Math.min(doc.numPages, MAX_STUDY_PAGES); i++) {
+      const page = await doc.getPage(i)
+      const c = await page.getTextContent()
+      const t = squash(c.items.map(x => (x.str || '') + (x.hasEOL ? '\n' : ' ')).join(''))
+      if (t.length > 3) pages.push({ label: `Page ${i}`, text: t })
+    }
+  } finally { doc.destroy().catch(() => {}) }
+  return pages
+}
+
+/**
+ * Reads a whole document as labelled sections (pages / slides / parts) for studying.
+ * @returns {{ ok: boolean, kind: string, sections: {label:string, text:string}[], reason?: string }}
+ */
+async function readSections(file) {
+  const ext = extOf(file)
+  try {
+    const st = await fs.promises.stat(file)
+    if (!st.isFile()) return { ok: false, kind: 'other', sections: [], reason: 'not a file' }
+    if (IMAGE_EXT.has(ext)) return { ok: false, kind: 'image', sections: [], reason: 'Images cannot be studied yet.' }
+    if (st.size > MAX_READ_BYTES) return { ok: false, kind: 'large', sections: [], reason: 'This file is too large to read.' }
+    let sections = []
+    if (ext === 'pdf') {
+      try { sections = await pdfPages(file) } catch { sections = [] }
+      if (!sections.length) sections = splitText(squash(rawPdfText(await fs.promises.readFile(file), 400000)), 'Part')
+    } else if (ext === 'pptx') {
+      const JSZip = require('jszip')
+      const zip = await JSZip.loadAsync(await fs.promises.readFile(file))
+      const names = Object.keys(zip.files).filter(n => /^ppt\/slides\/slide\d+\.xml$/.test(n)).sort((a, b) => parseInt(a.match(/\d+/)[0]) - parseInt(b.match(/\d+/)[0]))
+      for (const n of names) {
+        const t = squash(xmlText(await zip.file(n).async('string')))
+        if (t.length > 3) sections.push({ label: `Slide ${parseInt(n.match(/\d+/)[0])}`, text: t })
+      }
+      const notes = Object.keys(zip.files).filter(n => /^ppt\/notesSlides\/notesSlide\d+\.xml$/.test(n))
+      for (const n of notes) {
+        const idx = parseInt(n.match(/\d+/)[0]); const t = squash(xmlText(await zip.file(n).async('string')))
+        const sec = sections.find(x => x.label === `Slide ${idx}`)
+        if (sec && t.length > 12) sec.text += '\nSpeaker notes: ' + t
+      }
+    } else if (ext === 'docx' || ext === 'odt') {
+      const JSZip = require('jszip')
+      const zip = await JSZip.loadAsync(await fs.promises.readFile(file))
+      const f = zip.file(ext === 'docx' ? 'word/document.xml' : 'content.xml')
+      const xml = f ? await f.async('string') : ''
+      const text = xmlText(xml).replace(/[ \t]+\n/g, '\n').replace(/\n{1}/g, '\n\n')
+      sections = splitText(text.replace(/[ \t]+/g, ' ').trim(), 'Part')
+    } else if (ext in ZIP_XML) {
+      const t = await readZipXml(file, ext, 400000)
+      sections = splitText(squash(t), 'Part')
+    } else if (TEXT_EXT.has(ext) || (!ext && st.size < 2_000_000)) {
+      let text = await fs.promises.readFile(file, 'utf8')
+      if (/^(html|htm|xml)$/.test(ext)) text = xmlText(text.replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' '))
+      if (ext === 'rtf') text = text.replace(/\\par[d]?/g, '\n').replace(/\{\\\*[^}]*\}/g, '').replace(/\\[a-z]+-?\d* ?/gi, '').replace(/[{}]/g, '')
+      text = text.replace(/\u0000/g, ' ').replace(/\r/g, '').trim()
+      if (ext === 'md' || ext === 'markdown') { // split on headings
+        const parts = text.split(/\n(?=#{1,3} )/).filter(x => x.trim())
+        if (parts.length > 1) sections = parts.map(p => ({ label: (p.match(/^#{1,3} +(.+)/) || [])[1]?.trim().slice(0, 60) || 'Section', text: p.trim() }))
+      }
+      if (!sections.length) sections = splitText(text, 'Part')
+    } else return { ok: false, kind: 'binary', sections: [], reason: 'This file type cannot be studied yet.' }
+    const total = sections.reduce((n, s) => n + s.text.length, 0)
+    if (total < 80) return { ok: false, kind: ext, sections: [], reason: 'No readable text found (is it a scanned document?).' }
+    return { ok: true, kind: ext, sections }
+  } catch (e) {
+    return { ok: false, kind: ext, sections: [], reason: e.message }
+  }
+}
+
+module.exports = { readExcerpt, readSections, splitText, rawPdfText, IMAGE_EXT }
