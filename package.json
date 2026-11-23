@@ -17,6 +17,7 @@
     "start": "vite build && electron .",
     "electron:dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && cross-env KOOLMATE_DEV=1 electron .\"",
     "test": "node --test --test-force-exit tests/*.test.js",
+    "pack:extension": "node scripts/pack-extension.js",
     "dist": "vite build && electron-builder --win --publish never",
     "dist:dir": "vite build && electron-builder --dir --publish never",
     "dist:mac": "vite build && electron-builder --mac --publish never",
@@ -55,6 +56,9 @@
       "dist/**/*",
       "electron/**/*",
       "package.json"
+    ],
+    "asarUnpack": [
+      "electron/extension/**"
     ],
     "win": {
       "target": [

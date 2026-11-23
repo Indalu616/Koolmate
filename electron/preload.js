@@ -1,7 +1,7 @@
 'use strict'
 const { contextBridge, ipcRenderer } = require('electron')
 
-const EVENTS = new Set(['suggestions:changed', 'index:progress', 'activity:changed', 'popup:show', 'navigate', 'settings:changed', 'task:progress', 'study:stream'])
+const EVENTS = new Set(['suggestions:changed', 'index:progress', 'activity:changed', 'popup:show', 'navigate', 'settings:changed', 'task:progress', 'study:stream', 'flow:update'])
 
 async function call(channel, ...args) {
   const res = await ipcRenderer.invoke(channel, ...args)
@@ -30,7 +30,10 @@ contextBridge.exposeInMainWorld('koolmate', {
   },
   organize: { preview: req => call('organize:preview', req), execute: req => call('organize:execute', req) },
   sort: { scan: req => call('sort:scan', req), execute: req => call('sort:execute', req) },
+  tidy: { apply: id => call('tidy:apply', id), dismiss: id => call('tidy:dismiss', id) },
   activity: { list: () => call('activity:list'), undo: id => call('activity:undo', id), undoBatch: id => call('activity:undo-batch', id) },
+  catalog: { majors: () => call('catalog:majors') },
+  extension: { status: () => call('extension:status'), reveal: () => call('extension:reveal'), openStore: which => call('extension:open-store', which) },
   demo: { load: () => call('demo:load'), simulate: () => call('demo:simulate') },
   ai: { test: (key, model) => call('ai:test', key, model) },
   popup: { close: () => call('popup:close'), resize: h => call('popup:resize', h), openMain: route => call('popup:open-main', route) },

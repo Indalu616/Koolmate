@@ -12,20 +12,20 @@
  */
 const path = require('path')
 const { STOP_WORDS, tokenize, tokenizeWithCodes, extOf, categoryOfExt } = require('./common')
-const { extractSignals, TYPE_FOLDER_ALIASES, TYPE_RULES, scoreFolder, jaccardMax, toConfidence, courseFolderName } = require('./classifier')
+const { extractSignals, TYPE_FOLDER_ALIASES, TYPE_RULES, scoreFolder, jaccardMax, toConfidence, courseFolderName, joinedName } = require('./classifier')
 
 // ------------------------------------------------------------------ small helpers
 
 const stem = w => (w.length > 3 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w)
 const stems = text => tokenize(text).filter(t => t.length > 1).map(stem)
 const title = s => s.replace(/\b\w/g, c => c.toUpperCase())
-const cleanSegment = s => String(s || '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').replace(/^\.+/, '').trim().slice(0, 60)
+const cleanSegment = s => String(s || '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').replace(/^\.+/, '').trim().slice(0, 90)
 
 const TYPE_DEFAULT_NAME = {
-  Lectures: 'Lecture Materials', Assignments: 'Assignments', Labs: 'Labs', Exams: 'Exams',
+  Lectures: 'LectureMaterials', Assignments: 'Assignments', Activities: 'Activities', Labs: 'Labs', Exams: 'Exams',
   Syllabus: 'Syllabus', Projects: 'Projects', Notes: 'Notes', Readings: 'Readings'
 }
-const TYPE_LABEL = { Lectures: 'lecture', Assignments: 'assignment', Labs: 'lab', Exams: 'exam', Syllabus: 'syllabus', Projects: 'project', Notes: 'notes', Readings: 'reading' }
+const TYPE_LABEL = { Lectures: 'lecture', Assignments: 'assignment', Activities: 'activity', Labs: 'lab', Exams: 'exam', Syllabus: 'syllabus', Projects: 'project', Notes: 'notes', Readings: 'reading' }
 
 // ------------------------------------------------------------------ semester
 
@@ -78,6 +78,8 @@ const TYPE_PATTERNS = [
   ['Syllabus', [/\bsyllabus\b/i, /\bcourse (description|outcomes|objectives)\b/i, /\bgrading (policy|scheme)\b/i, /\boffice hours\b/i, /\bprerequisites?\b/i]],
   ['Exams', [/\b(mid-?term|final) exam/i, /\bexam(ination)?\b/i, /\bquiz\b/i, /\bquestion paper\b/i, /\bmarks?\b.*\bduration\b/i, /\btime allowed\b/i, /\bpast paper\b/i]],
   ['Assignments', [/\bassignment\s*#?\d*/i, /\bhomework\b/i, /\bproblem set\b/i, /\bdue (date|on|by)\b/i, /\bsubmit (by|before|via)\b/i, /\bdeadline\b/i]],
+  ['Activities', [/\bactivit(y|ies)\b/i, /\bcase study\b/i, /\breview questions\b/i,
+    /\b(aha ?slides|kahoot|mentimeter|menti\.com|quizizz|slido|poll ?everywhere|wooclap|nearpod|padlet)\b/i, /\bleaderboard\b/i, /\b(vote|poll|join) (at|now|code)\b/i, /\b(in[- ]?class|class|group|team|individual|hands[- ]on) (activity|exercise|task)\b/i, /\bwork (in|with) (pairs|groups|your (group|team|partner))\b/i, /\bworksheet\b/i, /\bdiscuss (with|in) (your )?(group|partner|team)\b/i, /\btime(box)?:?\s*\d+\s*(min|minutes)\b/i]],
   ['Labs', [/\blab(oratory)?[\s-]*(report|manual|exercise|session|sheet|\d)/i, /\bexperiment\b/i, /\bprocedure\b.*\bapparatus\b/i, /\blab objectives?\b/i]],
   ['Projects', [/\bproject (proposal|report|plan|charter|description)\b/i, /\bmilestone\b/i, /\bdeliverables?\b/i, /\bcapstone\b/i]],
   ['Lectures', [/\blecture\s*#?\d*/i, /\bslides?\b/i, /\bchapter\s*\d+/i, /\blearning outcomes?\b/i, /\bagenda\b/i, /\btoday'?s (topic|class)\b/i, /\boutline\b/i]],
@@ -85,14 +87,47 @@ const TYPE_PATTERNS = [
   ['Notes', [/\bnotes?\b/i, /\bsummary\b/i, /\bcheat ?sheet\b/i, /\brevision\b/i]]
 ]
 
-function detectDocType(text) {
+// A line that asks the student to do something: "List the concepts…", "Google the difference…", "Why do you think…?"
+const TASK_LINE = /^\s*(?:\(?\d+[.)]|\(?[a-z][.)]|[-•*▪●])?\s*(?:list|explain|describe|define|compare|contrast|use|google|search|find|write|draw|answer|discuss|calculate|compute|summari[sz]e|show|identify|give|state|prepare|design|create|analy[sz]e|evaluate|justify|solve|complete|fill|choose|select|match|what|why|how|which|who|when|where|is|are|do|does|can)\b/i
+
+/**
+ * Worksheets: mostly instructions and questions for the student, whatever the file is called
+ * ("ITE442 - Lecture 0.docx" that is really an independent-learning task sheet).
+ */
+function taskSheetScore(text) {
+  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length >= 12)
+  if (lines.length < 4) return 0
+  const tasks = lines.filter(l => TASK_LINE.test(l) || /\?\s*$/.test(l)).length
+  if (tasks < 4 || tasks / lines.length < 0.3) return 0
+  let score = 2 + Math.min(3, (tasks - 4) * 0.25)
+  if (/\b(rules|instructions|directions|guidelines)\s*:/i.test(text)) score += 2
+  if (/\b(independent|self[- ]?directed|self)[- ]?(learning|study)\b|\breview questions\b|\bcase study\b|\bpractice questions\b/i.test(text)) score += 2
+  if (/\bpart\s*(1|2|one|two|a|b)\b/i.test(text)) score += 0.7
+  return score
+}
+
+/** How strongly the text reads like each kind of course material (the title/first lines count most). */
+function scoreDocTypes(text) {
   const head = text.slice(0, 700)
-  let best = null
+  const scores = {}
   for (const [type, pats] of TYPE_PATTERNS) {
     let score = 0
     for (const p of pats) { if (p.test(head)) score += 2; else if (p.test(text)) score += 0.7 }
-    if (score > 0 && (!best || score > best.score)) best = { type, score }
+    scores[type] = score
   }
+  // a task sheet is an assignment when it is graded or has a deadline, otherwise an activity
+  const tasks = taskSheetScore(text)
+  if (tasks) {
+    const graded = /\b(due (date|on|by)?|deadline|submit(ted|ssion)?\b|marks?\b|points?\b|grade[ds]?\b|weight(ing)?\s*:?\s*\d+\s*%)/i.test(text)
+    scores[graded ? 'Assignments' : 'Activities'] += tasks
+  }
+  let best = null
+  for (const [type, score] of Object.entries(scores)) if (score > 0 && (!best || score > best.score)) best = { type, score }
+  return { best, scores }
+}
+
+function detectDocType(text) {
+  const { best } = scoreDocTypes(text)
   return best && best.score >= 1.4 ? best.type : null
 }
 
@@ -128,7 +163,7 @@ function detectTopic(text) {
 // "scan_0108", "IMG2001", "INV1234" look like course codes but are not
 const NOT_A_COURSE = /^(scan|img|image|dsc|dscn|pxl|doc|docs|file|photo|pic|page|vid|mov|screenshot|screen|whatsapp|wa|ss|fig|chart|table|part|copy|new|ver|version|ref|inv|bill|order|ticket|invoice|receipt|report|test|form|id|pdf|document|download|export|output|untitled)\d/i
 const realCourse = c => (c && (c.known || !NOT_A_COURSE.test(String(c.code || '').replace(/[\s_-]/g, '')))) ? c : null
-const ACADEMIC = new Set(['Lectures', 'Assignments', 'Labs', 'Exams', 'Syllabus'])
+const ACADEMIC = new Set(['Lectures', 'Assignments', 'Activities', 'Labs', 'Exams', 'Syllabus'])
 const GENERIC = new Set(['img', 'dsc', 'scan', 'scanned', 'camscanner', 'document', 'doc', 'docs', 'file', 'untitled', 'copy', 'download', 'downloads', 'final', 'new', 'version', 'draft', 'whatsapp', 'image', 'photo', 'screenshot', 'signal', 'pxl', 'adobe', 'pdf', 'docx', 'pptx', 'xlsx', 'page', 'pages', 'unnamed', 'noname', 'scan', 'attachment', 'report', 'data', 'export', 'output', 'sample', 'test', 'temp', 'tmp', 'jpeg', 'jpg', 'png', 'com', 'www', 'v1', 'v2'])
 
 function meaningfulTokens(name) {
@@ -151,7 +186,8 @@ function isSelfDescriptive(name, sig) {
 /** Course folders already on disk count as subjects even if the user never configured them. */
 function subjectsFromCatalog(catalog, configured = []) {
   const subjects = configured.map(c => ({ ...c, keywords: c.keywords || [] }))
-  const have = c => subjects.some(s => (s.code && c.code && s.code.toLowerCase() === c.code.toLowerCase()) || (!c.code && stems(s.name || '').join(' ') === stems(c.name).join(' ')))
+  const codeKey = x => String(x || '').toLowerCase().replace(/[\s_-]/g, '')
+  const have = c => subjects.some(s => (s.code && c.code && codeKey(s.code) === codeKey(c.code)) || (!c.code && stems(s.name || '').join(' ') === stems(c.name).join(' ')))
   const dirSet = new Set(catalog.map(f => f.path))
   for (const f of catalog) {
     if (isSemesterName(f.name) || typeOfName(f.name) || f.name.length < 3) continue
@@ -184,12 +220,73 @@ function typeOfName(name) {
 }
 
 function subjectMatchesFolder(subject, f) {
-  const code = (subject.code || '').toLowerCase()
+  const code = (subject.code || '').toLowerCase().replace(/[\s_-]/g, '')
   if (code && f.leafTokens.includes(code)) return true
   const nameStems = stems(subject.name || '').filter(t => t.length > 1)
   const leafStems = f.leafTokens.map(stem)
   if (nameStems.length && nameStems.every(t => leafStems.includes(t))) return true
+  // the student's own short name for the course: "Big Data" for "Data Science and Big Data Analytics"
+  const leafWords = Array.from(new Set(f.leafTokens.filter(t => /^[a-z]+$/.test(t) && t.length > 1 && !STOP_WORDS.has(t)).map(stem)))
+  if (leafWords.length >= 2 && leafWords.every(t => nameStems.includes(t))) return true
+  // ...or its initials: "HCI" for "Human Computer Interaction", "AI" for "Artificial Intelligence"
+  const initials = nameStems.filter(t => !STOP_WORDS.has(t)).map(t => t[0]).join('')
+  const leafRaw = f.leafTokens.filter(t => /^[a-z]+$/.test(t) && !STOP_WORDS.has(t))
+  if (initials.length >= 2 && leafRaw.length === 1 && leafRaw[0] === initials) return true
+  // ...or just its first, distinctive word: "Distributed" for "Distributed Systems"
+  const firstWord = nameStems.find(t => !STOP_WORDS.has(t))
+  if (nameStems.length >= 2 && leafWords.length === 1 && leafWords[0] === firstWord && firstWord.length >= 6 && !VAGUE_FIRST_WORDS.has(firstWord)) return true
   return (subject.keywords || []).some(k => k.length > 3 && f.leafTokens.includes(k.toLowerCase()))
+}
+const VAGUE_FIRST_WORDS = new Set(['introduct', 'introduction', 'fundamental', 'principl', 'principle', 'advanc', 'advanced', 'special', 'selected', 'select',
+  'topic', 'applied', 'appli', 'general', 'computer', 'comput', 'software', 'system', 'business', 'design', 'research', 'project', 'professional', 'profession',
+  'engineering', 'engineer', 'modern', 'contemporary', 'english', 'arabic', 'islamic', 'information', 'inform', 'management', 'manag'].map(stem))
+
+const sameFileName = (a, b) => {
+  const n = s => s.toLowerCase().replace(/\.[^.]+$/, '').replace(/\s*\(\d+\)/g, '').replace(/[^a-z0-9]+/g, '')
+  return n(a).length >= 6 && n(a) === n(b)
+}
+
+/**
+ * The student's folder may have a name that says nothing about the course ("Uni stuff", "Sem 5") but
+ * already hold its files. Scores a folder by what is inside it (and its subfolders): files named with the
+ * course code or the full course name, or the very same file as the one being filed.
+ */
+function folderFileEvidence(subject, f, dirs, fileName = '') {
+  const inside = dirs.filter(d => d === f || d.path.startsWith(f.path + path.sep))
+  const names = inside.flatMap(d => d.files || [])
+  if (!names.length) return { score: 0, why: '' }
+  const code = (subject.code || '').toLowerCase().replace(/[\s_-]/g, '')
+  const ns = stems(subject.name || '').filter(t => t.length > 1 && !STOP_WORDS.has(t))
+  let same = 0, coded = 0, named = 0
+  for (const n of names) {
+    if (fileName && sameFileName(n, fileName)) same++
+    const compact = n.toLowerCase().replace(/[\s_-]/g, '')
+    if (code && new RegExp(`(?<![a-z])${code}(?!\\d)`).test(compact)) coded++
+    else if (ns.length >= 2) { const st = new Set(stems(n)); if (ns.every(t => st.has(t))) named++ }
+  }
+  const score = (same ? 4 : 0) + Math.min(coded, 3) * 1.5 + Math.min(named, 2)
+  const why = same ? 'already has this file' : coded ? `has ${coded} ${subject.code} file${coded > 1 ? 's' : ''}` : named ? `has ${subject.name} files` : ''
+  return { score, why }
+}
+
+/** Best existing folder that holds this course's files, when no folder name matches the course. */
+function folderByContents(subject, dirs, fileName, roots, filePath = '') {
+  const rootSet = new Set(roots.map(r => path.resolve(r)))
+  const codeRe = /(?<![A-Za-z])([A-Za-z]{2,4})[\s_-]?(\d{3})(?!\d)/
+  const here = filePath ? path.resolve(filePath) : ''
+  let best = null
+  for (const f of dirs) {
+    if (isSemesterName(f.name) || typeOfName(f.name)) continue
+    if (here && here.startsWith(f.path + path.sep)) continue // the folder the file is in right now (being sorted) proves nothing
+    const parent = parentOf(f.path)
+    // a course folder sits directly in a destination root or in a semester folder
+    if (!(rootSet.has(parent) || rootSet.has(f.root) && f.depth === 1 || isSemesterName(path.basename(parent)))) continue
+    const other = f.name.match(codeRe) // "CSC301-Data Structure" belongs to CSC301, whatever is inside
+    if (other && (other[1] + other[2]).toLowerCase() !== (subject.code || '').toLowerCase().replace(/[\s_-]/g, '')) continue
+    const ev = folderFileEvidence(subject, f, dirs, fileName)
+    if (ev.score >= 3 && (!best || ev.score > best.score)) best = { folder: f, ...ev }
+  }
+  return best
 }
 
 /** Which subject does this text talk about? `weight` makes content matches stricter than file names. */
@@ -203,6 +300,7 @@ function detectSubject(text, subjects, { content = false } = {}) {
     let score = 0
     const code = (s.code || '').toLowerCase().replace(/[\s_-]/g, '')
     if (code) { const hits = compact.split(code).length - 1; if (hits) score += 3 + Math.min(hits - 1, 3) * 0.5 }
+    if (s.codeOnly) { if (score > 0 && (!best || score > best.score)) best = { subject: s, score }; continue }
     const ns = stems(s.name || '').filter(t => t.length > 1)
     if (ns.length && ns.every(t => stemSet.has(t))) score += (ns.every(t => head.has(t)) ? 3 : 1.5) * (ns.length === 1 && ns[0].length < 6 ? 0.7 : 1)
     if (!content) for (const k of s.keywords || []) { if (k.length >= 2 && tokenize(text).includes(k.toLowerCase())) score += 2.5 }
@@ -233,14 +331,15 @@ function firstLine(text) {
 /**
  * @param {object} p { file:{name,mtime,size}, content:{ok,text}|null, subjects, sourceUrl }
  */
-function understand({ file, content, subjects, sourceUrl = '' }) {
+function understand({ file, content, subjects, sourceUrl = '', courseHint = null }) {
   const sig = extractSignals(file.name, { sourceUrl, courses: subjects })
   sig.course = realCourse(sig.course)
   const text = content?.ok ? content.text : ''
   const nameSubject = detectSubject(file.name.replace(/\.[^.]+$/, ''), subjects)
   const textSubject = text ? detectSubject(text, subjects, { content: true }) : null
-  let course = sig.course?.known ? sig.course : null
-  let courseEvidence = course ? 'file name' : null
+  // the Blackboard course the file was downloaded from beats anything guessed from the file
+  let course = courseHint ? { code: courseHint.code || '', name: courseHint.name || '', keywords: [], known: true } : (sig.course?.known ? sig.course : null)
+  let courseEvidence = courseHint ? (courseHint.evidence || 'Blackboard course page') : course ? 'file name' : null
   let courseStrength = course ? 1 : 0
   if (!course && nameSubject) { course = { code: nameSubject.subject.code, name: nameSubject.subject.name, known: true }; courseEvidence = 'file name'; courseStrength = Math.min(1, nameSubject.score / 3) }
   if (!course && textSubject) { course = { code: textSubject.subject.code, name: textSubject.subject.name, known: true }; courseEvidence = 'file content'; courseStrength = Math.min(1, textSubject.score / 4) }
@@ -254,15 +353,26 @@ function understand({ file, content, subjects, sourceUrl = '' }) {
     const m = text.slice(0, 600).match(/(?<![A-Za-z])([A-Z]{2,4})[\s-]?(\d{3,4})(?!\d)/)
     if (m && !/^(19|20)\d\d$/.test(m[2])) { course = { code: m[1] + m[2], name: '', known: false }; courseEvidence = 'file content'; courseStrength = 0.55 }
   }
-  const contentType = text ? detectDocType(text) : null
-  const type = sig.type || contentType
+  const docScores = text ? scoreDocTypes(text) : null
+  const contentType = docScores?.best && docScores.best.score >= 1.4 ? docScores.best.type : null
+  // slides from a known course are lecture material unless the name or content says otherwise
+  const slidesType = !sig.type && !contentType && course && sig.category === 'Presentations' ? 'Lectures' : null
+  // The name is a hint; what the file actually says wins when it clearly disagrees
+  // ("Lecture 5.pptx" whose first slide is "In-class activity" goes to Activities).
+  // Lab/Assignment/Exam/Project in a name is deliberate; "Lecture"/"Notes" often just means "week N material".
+  const contentWins = !!(sig.type && ['Lectures', 'Notes', 'Readings', 'Syllabus'].includes(sig.type) && contentType && contentType !== sig.type &&
+    docScores.best.score >= 2 && docScores.best.score >= (docScores.scores[sig.type] || 0) + 1.3)
+  const type = contentWins ? contentType : (sig.type || contentType || slidesType)
+  const typeEvidence = contentWins ? `file content (the name said ${TYPE_LABEL[sig.type] || sig.type})`
+    : sig.type ? (contentType === sig.type ? 'file name and content' : 'file name')
+      : contentType ? 'file content' : slidesType ? 'file type (slides)' : null
   const semester = parseSemester(file.name) || (text ? parseSemester(text.slice(0, 1500)) : null)
   const semesterFrom = semester ? (parseSemester(file.name) ? 'file name' : 'file content') : null
   const topic = !course && text ? detectTopic(text) : (!course ? detectTopic(file.name.replace(/[_\-.]+/g, ' ')) : null)
   const ttl = text ? firstLine(text) : ''
   const keywords = topKeywords(text, `${file.name.replace(/\.[^.]+$/, '')} ${ttl}`)
   return {
-    sig, course, courseEvidence, courseStrength, type, week: sig.week, typeEvidence: sig.type ? 'file name' : contentType ? 'file content' : null,
+    sig, course, courseEvidence, courseStrength, type, week: sig.week, typeEvidence,
     semester, semesterFrom, topic, keywords, title: ttl, readContent: !!text, ext: sig.ext, category: sig.category,
     tokens: Array.from(new Set([...sig.tokens, ...keywords]))
   }
@@ -287,11 +397,10 @@ function resolveDestination(a, { catalog, roots, learning = {}, subjects = [] })
   const sem = a.semester || semesterFromTime(a.mtime)
   const semLabel = `${sem.term} ${sem.year}`
   const conventionName = (type, hintDirs = []) => {
-    for (const cd of hintDirs) { const c = dirs.find(x => parentOf(x.path) === cd.path && typeOfName(x.name) === type); if (c) return c.name } // same course, other semester
-    const names = {}
-    for (const f of dirs) if (typeOfName(f.name) === type && !isSemesterName(f.name)) names[f.name] = (names[f.name] || 0) + 1
-    const top = Object.entries(names).sort((x, y) => y[1] - x[1])[0]
-    return top ? top[0] : TYPE_DEFAULT_NAME[type] || title(type)
+    // reuse the student's own subfolder name only within the same course; otherwise the standard
+    // style (LectureMaterials, Labs, Activities…), so one course's "Slides" doesn't spread to others
+    for (const cd of hintDirs) { const c = dirs.find(x => parentOf(x.path) === cd.path && typeOfName(x.name) === type); if (c) return c.name }
+    return TYPE_DEFAULT_NAME[type] || title(type)
   }
   const usesTypeFolders = courseDir => dirs.some(c => parentOf(c.path) === courseDir.path && typeOfName(c.name)) ||
     dirs.some(c => typeOfName(c.name) && subjects.some(s => dirs.some(cd => cd.path === parentOf(c.path) && subjectMatchesFolder(s, cd))))
@@ -299,6 +408,12 @@ function resolveDestination(a, { catalog, roots, learning = {}, subjects = [] })
   if (a.course) {
     const subject = { code: a.course.code, name: a.course.name, keywords: a.course.keywords || [] }
     const courseDirs = dirs.filter(f => !isSemesterName(f.name) && !typeOfName(f.name) && subjectMatchesFolder(subject, f))
+    // no folder named after the course: maybe one of the student's folders already holds its files
+    let foundByFiles = null
+    if (!courseDirs.length) {
+      foundByFiles = folderByContents(subject, dirs, a.fileName || '', roots.length ? roots : [root0], a.filePath || '')
+      if (foundByFiles) courseDirs.push(foundByFiles.folder)
+    }
     const learned = learning.courseFolders?.[(a.course.code || '').toLowerCase()]
     const rank = f => {
       const k = semesterKeyOfPath(f)
@@ -310,7 +425,8 @@ function resolveDestination(a, { catalog, roots, learning = {}, subjects = [] })
     const strong = Math.min(1, strength)
     const courseLabel = a.course.name || a.course.code
     const typeLabel = a.type ? TYPE_LABEL[a.type] : null
-    const describe = [courseLabel, typeLabel, conv ? semLabel : null].filter(Boolean).join(' · ')
+    const describe = [courseLabel, typeLabel, conv ? semLabel : null].filter(Boolean).join(' · ') +
+      (foundByFiles ? ` · your “${foundByFiles.folder.name}” folder ${foundByFiles.why}` : '')
 
     // other existing folders (alternatives)
     const typedChild = (cd, type) => type && dirs.find(c => parentOf(c.path) === cd.path && typeOfName(c.name) === type)
@@ -326,20 +442,20 @@ function resolveDestination(a, { catalog, roots, learning = {}, subjects = [] })
       const tc = typedChild(inTarget, a.type)
       if (tc) primary = { folder: tc.path, isNewFolder: false, confidence: 0.94 * strong + 0.04, reason: `${describe} · folder already exists` }
       else if (!a.type) primary = { folder: inTarget.path, isNewFolder: false, confidence: 0.8 * strong + 0.1, reason: `${describe} · course folder exists` }
-      else if (usesTypeFolders(inTarget) || dirs.some(c => parentOf(c.path) === inTarget.path)) {
-        const nm = conventionName(a.type)
+      else {
+        // every course gets type subfolders (LectureMaterials, Labs, ...), also in a folder that has none yet
+        const nm = conventionName(a.type, courseDirs)
         primary = { folder: path.join(inTarget.path, nm), isNewFolder: true, confidence: 0.82 * strong, reason: `${describe} · create “${nm}” in your existing course folder` }
         addAlt(inTarget.path, 0.55, 'course folder')
-      } else {
-        primary = { folder: inTarget.path, isNewFolder: false, confidence: 0.78 * strong, reason: `${describe} · course folder exists` }
-        addAlt(path.join(inTarget.path, conventionName(a.type)), 0.5, `new “${conventionName(a.type)}” folder`, true)
       }
     } else {
       // course folder (and maybe semester folder) must be created
       const sample = courseDirs.length ? courseDirs[0] : null
       const nameOnly = dirs.filter(f => subjects.some(s => subjectMatchesFolder(s, f)) && semesterKeyOfPath(f)).every(f => !/[A-Za-z]{2,4}[\s_-]?\d{3,4}/.test(f.name)) &&
         dirs.some(f => subjects.some(s => subjectMatchesFolder(s, f)) && semesterKeyOfPath(f))
-      const courseName = cleanSegment(nameOnly && a.course.name ? a.course.name : courseFolderName(a.course) || a.course.name || a.course.code)
+      // same course in another semester: keep the student's own name for it
+      const courseName = sample && conv ? sample.name
+        : cleanSegment(nameOnly && a.course.name ? joinedName(a.course.name) : courseFolderName(a.course) || a.course.name || a.course.code)
       const typeName = a.type ? conventionName(a.type, courseDirs) : null
       let base, why
       if (conv) {
@@ -410,9 +526,11 @@ function describeAnalysis(a, fileName) {
 }
 
 /** Understand + resolve in one step (used for downloads and folder sorting). */
-function plan({ file, content, subjects, catalog, roots, learning, sourceUrl }) {
-  const a = understand({ file, content, subjects, sourceUrl })
+function plan({ file, content, subjects, catalog, roots, learning, sourceUrl, courseHint = null }) {
+  const a = understand({ file, content, subjects, sourceUrl, courseHint })
   a.mtime = file.mtime
+  a.fileName = file.name
+  a.filePath = file.path || ''
   const r = resolveDestination(a, { catalog, roots, learning, subjects })
   return { analysis: a, ...r }
 }
@@ -463,5 +581,6 @@ function applyAi(a, ai, { subjects = [] } = {}) {
 
 module.exports = {
   applyAi, understand, resolveDestination, plan, publicAnalysis, isSelfDescriptive, subjectsFromCatalog, detectDocType, detectTopic, detectSubject,
+  subjectMatchesFolder, folderByContents, sameFileName,
   parseSemester, semesterFromTime, formatSemester, isSemesterName, typeOfName, cleanSegment, TYPE_LABEL, TYPE_DEFAULT_NAME
 }

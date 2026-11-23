@@ -66,7 +66,7 @@ test('classifier files a download into the matching course/type folder and propo
 
   const c = suggest({ fileName: 'GEN201_Lecture02_Mendelian_Genetics.pdf', ...base })
   assert.equal(c.primary.isNewFolder, true)
-  assert.match(c.primary.folder, /GEN201 Genetics[\\/]Lectures$/)
+  assert.match(c.primary.folder, /GEN201_Genetics[\\/]Lectures$/)
 
   const e = suggest({ fileName: 'Signal.pdf', ...base })
   assert.equal(e.needsReview, true)
@@ -108,15 +108,18 @@ test('mover never renames, avoids overwrites, blocks system folders, and undoes'
   if (process.platform !== 'win32') assert.throws(() => assertSafeDestination('/etc/secret'))
 })
 
-function makeCore() {
+function makeCore(extraSettings = {}) {
   const docs = tmp()
   const store = createStore(tmp())
-  const events = { suggestions: [], newSug: [], index: 0 }
+  const events = { suggestions: [], newSug: [], index: 0, flows: [], autoMoved: [] }
   const core = createCore({
     store, documentsDir: docs,
-    hooks: { onNewSuggestion: s => events.newSug.push(s), onSuggestions: l => events.suggestions.push(l), onIndex: () => events.index++, onTask: e => (events.tasks = events.tasks || []).push(e) }
+    hooks: {
+      onNewSuggestion: s => events.newSug.push(s), onSuggestions: l => events.suggestions.push(l), onIndex: () => events.index++,
+      onTask: e => (events.tasks = events.tasks || []).push(e), onFlow: f => events.flows.push(f), onAutoMoved: e => events.autoMoved.push(e)
+    }
   })
-  core.updateSettings({ searchRoots: [docs], watchedFolders: [], destinationRoots: [docs], geminiApiKey: '' })
+  core.updateSettings({ searchRoots: [docs], watchedFolders: [], destinationRoots: [docs], geminiApiKey: '', ...extraSettings })
   return { core, docs, store, events }
 }
 
@@ -151,8 +154,8 @@ test('core: organize preview -> execute -> undo batch', async () => {
   const q = 'Find all my Genetics course materials and organize them'
   const r = await core.search(q)
   const preview = core.organizePreview({ paths: r.results.map(f => f.path), text: q })
-  assert.match(preview.folderName, /^GEN201 Genetics$/)
-  assert.match(preview.base, /University[\\/]GEN201 Genetics$/)
+  assert.match(preview.folderName, /^GEN201_Genetics$/)
+  assert.match(preview.base, /University[\\/]GEN201_Genetics$/)
   assert.ok(preview.items.length >= 4)
   assert.ok(preview.items.some(i => i.sub === 'Lectures'))
   assert.ok(preview.items.some(i => i.sub === 'Labs'))
@@ -169,7 +172,7 @@ test('core: organize preview -> execute -> undo batch', async () => {
 })
 
 test('core: a finished download is detected, suggested, accepted, learned and can be undone', async () => {
-  const { core, events } = makeCore()
+  const { core, events } = makeCore({ autoFileCourses: false })
   core.loadDemo()
   await core.rebuildIndex()
   const file = core.simulateDownload() // CSC408 lecture, written in two stages like a real download
@@ -268,7 +271,7 @@ test('core: sort a folder — reads unlabeled files, reuses existing folders, pr
   assert.equal(gen.primary.isNewFolder, true)
 
   const st = by['Software Testing Lecture 1.pdf']
-  assert.equal(rel(st), `${sem}/Software Testing/Lecture Materials`)
+  assert.equal(rel(st), `${sem}/SoftwareTesting/LectureMaterials`)
   assert.equal(st.primary.isNewFolder, true)
 
   assert.ok(events.tasks.some(e => e.kind === 'sort' && e.step === 'read'))
@@ -284,7 +287,7 @@ test('core: sort a folder — reads unlabeled files, reuses existing folders, pr
 })
 
 test('core: a download with a meaningless name is opened and filed by its content', async () => {
-  const { core } = makeCore()
+  const { core } = makeCore({ autoFileCourses: false })
   const d = core.loadDemo()
   await core.rebuildIndex()
   const f = demo.simulateDownload(path.join(d.root, 'Downloads'), 'scan_0108.pdf')
@@ -339,7 +342,7 @@ test('smart sort: semester parsing, naming conventions and hierarchy resolution'
   r = go('OS_Assignment_2.pdf') // acronym alias derived from the folder name
   assert.equal(rel(r), 'Fall 2026/Operating Systems/Assignments'); assert.equal(r.primary.isNewFolder, true)
   r = go('Distributed Systems Lecture 3.pdf') // course folder exists but is empty: follow the type-folder convention of the other courses
-  assert.equal(rel(r), 'Fall 2026/Distributed Systems/Lecture Materials'); assert.equal(r.primary.isNewFolder, true)
+  assert.equal(rel(r), 'Fall 2026/Distributed Systems/LectureMaterials'); assert.equal(r.primary.isNewFolder, true)
   r = go('Database_Lecture_9.pdf') // only exists in Spring; this is Fall -> create under Fall, keep Spring as alternative
   assert.equal(rel(r), 'Fall 2026/Database Management/Lectures'); assert.equal(r.primary.isNewFolder, true)
   assert.ok(r.alternatives.some(a => /Spring 2026/.test(a.folder)))
@@ -351,4 +354,392 @@ test('smart sort: semester parsing, naming conventions and hierarchy resolution'
   assert.equal(ss.isSelfDescriptive('scan_0042.pdf', { course: null }), false)
   assert.equal(ss.isSelfDescriptive('Signal.pdf', { course: null }), false)
   assert.equal(ss.isSelfDescriptive('Compiler Design Notes.pdf', { course: null, type: 'Notes' }), true)
+})
+
+// ---------------------------------------------------------------- ADU catalog + automatic filing
+
+const aduCatalog = require('../electron/services/aduCatalog')
+const SWE = 'Bachelor of Science in Software Engineering'
+
+function writeDownload(dir, name, title, lines = []) {
+  fs.mkdirSync(dir, { recursive: true })
+  const p = path.join(dir, name)
+  fs.writeFileSync(p, demo.makePdf(title, lines))
+  const st = fs.statSync(p)
+  return { path: p, name, size: st.size, mtime: st.mtimeMs }
+}
+const stepsOf = flow => Object.fromEntries(flow.steps.map(s => [s.key, s]))
+
+test('ADU catalog: majors, official titles, and name matching limited to the student\'s major', () => {
+  const majors = aduCatalog.majors()
+  assert.ok(majors.length >= 30)
+  assert.ok(majors.some(m => m.name === SWE))
+  assert.equal(aduCatalog.courseTitle('CSC 408'), 'Distributed Information Systems')
+  assert.equal(aduCatalog.courseTitle('csc408'), 'Distributed Information Systems')
+  const subj = aduCatalog.subjectsFor(SWE)
+  const by = code => subj.find(s => s.code === code)
+  assert.equal(by('CSC 301').codeOnly, false, 'own major course is matched by name')
+  assert.equal(by('ACC 200').codeOnly, true, 'other majors are matched by code only')
+  assert.equal(by('SWE 399A').codeOnly, true, 'generic titles like internships are code only')
+  assert.ok(aduCatalog.subjectsFor('').every(s => s.codeOnly), 'no major chosen: code only')
+})
+
+test('core: a recognised course download creates the course folder and subfolder and reports each real step', async () => {
+  const { core, docs, events } = makeCore({ major: SWE })
+  const dl = tmp()
+  const info = writeDownload(dl, 'CSC301_Lecture03_Trees.pdf', 'Lecture 3: Trees')
+  const sug = await core.handleNewFile({ ...info, sourceUrl: 'https://adu.blackboard.com/ultra/courses/_123_1/outline' })
+
+  const course = path.join(docs, 'CSC301_DataStructuresAndAlgorithms')
+  const target = path.join(course, 'LectureMaterials', info.name)
+  assert.equal(sug.status, 'moved')
+  assert.ok(fs.existsSync(target), 'file is inside the new course/subfolder')
+  assert.ok(!fs.existsSync(info.path))
+  assert.equal(core.activity()[0].source, 'auto')
+  assert.equal(events.autoMoved.length, 1)
+
+  const last = events.flows[events.flows.length - 1]
+  assert.equal(last.status, 'done')
+  assert.deepEqual(last.steps.map(s => s.key), ['detect', 'read', 'course', 'type', 'courseFolder', 'subFolder', 'move'])
+  assert.ok(last.steps.every(s => s.status === 'done'))
+  const st = stepsOf(last)
+  assert.match(st.detect.detail, /from Blackboard/)
+  assert.match(st.course.detail, /CSC 301 Data Structures and Algorithms/)
+  assert.match(st.courseFolder.detail, /^Created/)
+  assert.match(st.subFolder.detail, /^Created “.*LectureMaterials”/)
+  // steps arrive one at a time, in order (each emitted after it really happened)
+  const firstMove = events.flows.findIndex(f => f.steps.some(s => s.key === 'move'))
+  assert.ok(firstMove > events.flows.findIndex(f => f.steps.some(s => s.key === 'subFolder' && s.status === 'done')))
+
+  // second download of the same course: the course folder is found, a new subfolder is created
+  const lab = writeDownload(dl, 'Data Structures and Algorithms Lab 2.pdf', 'Lab 2')
+  const sug2 = await core.handleNewFile(lab)
+  assert.equal(sug2.status, 'moved')
+  assert.ok(fs.existsSync(path.join(course, 'Labs', lab.name)))
+  const st2 = stepsOf(events.flows[events.flows.length - 1])
+  assert.match(st2.courseFolder.detail, /^Found/)
+  assert.match(st2.subFolder.detail, /^Created/)
+  core.close()
+})
+
+test('core: an unrecognised download is not moved; the flow stops and waits for the student', async () => {
+  const { core, events } = makeCore({ major: SWE })
+  const info = writeDownload(tmp(), 'Signal.pdf', 'Signal')
+  const sug = await core.handleNewFile(info)
+  assert.equal(sug.status, 'pending')
+  assert.ok(fs.existsSync(info.path))
+  const last = events.flows[events.flows.length - 1]
+  assert.equal(last.status, 'waiting')
+  assert.equal(last.suggestionId, sug.id)
+  assert.equal(stepsOf(last).course.status, 'failed')
+
+  // accepting from the pop-up completes the same flow
+  const entry = await core.acceptSuggestion(sug.id)
+  const done = events.flows[events.flows.length - 1]
+  assert.equal(done.status, 'done')
+  assert.equal(done.entry.id, entry.id)
+  core.close()
+})
+
+// ---------------------------------------------------------------- Blackboard browser extension
+
+const http = require('http')
+const { createBridgeServer } = require('../electron/services/bridgeServer')
+
+function postJson(port, route, body, origin = 'chrome-extension://abcdefghijklmnop') {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify(body)
+    const req = http.request({ host: '127.0.0.1', port, path: route, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), Origin: origin } }, res => {
+      let out = ''; res.on('data', c => (out += c)); res.on('end', () => resolve({ status: res.statusCode, body: out ? JSON.parse(out) : null }))
+    })
+    req.on('error', reject); req.end(data)
+  })
+}
+
+test('bridge server: accepts the extension, refuses web pages', async () => {
+  const got = []
+  const bridge = createBridgeServer({ onDownload: h => { got.push(h); return { code: 'X' } }, version: '1.0.0' })
+  const port = await bridge.listen(0)
+  assert.ok(port)
+  const ok = await postJson(port, '/download', { fileName: 'a.pdf', courseId: '_1_1', courseTitle: 'T', evil: 'x' })
+  assert.equal(ok.status, 200)
+  assert.equal(got.length, 1)
+  assert.deepEqual(Object.keys(got[0]).sort(), ['courseCode', 'courseId', 'courseTitle', 'fileName', 'path', 'referrer', 'state', 'url'])
+  const bad = await postJson(port, '/download', { fileName: 'b.pdf' }, 'https://evil.example')
+  assert.equal(bad.status, 403)
+  assert.equal(got.length, 1, 'a web page cannot send hints')
+  await bridge.close()
+})
+
+test('extension: a file with no course in its name is filed under the Blackboard course it came from, and the course is remembered', async () => {
+  const { core, docs, events } = makeCore() // no major chosen
+  const bridge = createBridgeServer({ onDownload: h => core.addDownloadHint(h), onCourse: h => core.addCourseHint(h) })
+  const port = await bridge.listen(0)
+  const dl = tmp()
+
+  // what the extension sends when the student downloads from the HCI course page
+  const r = await postJson(port, '/download', { fileName: '[f] Week 11 - Design.pptx', path: path.join(dl, '[f] Week 11 - Design.pptx'), courseId: '_90411_1', courseTitle: 'Human Computer Interaction (Fall 2026)' })
+  assert.deepEqual(r.body.course, { code: 'ITE 409', name: 'Human Computer Interaction' })
+
+  const info = writeDownload(dl, '[f] Week 11 - Design.pptx', 'Week 11 Design')
+  const sug = await core.handleNewFile(info)
+  assert.equal(sug.status, 'moved')
+  const course = path.join(docs, 'ITE409_HumanComputerInteraction')
+  assert.ok(fs.existsSync(path.join(course, 'LectureMaterials', info.name)), 'slides from the course go to LectureMaterials')
+  const st = stepsOf(events.flows[events.flows.length - 1])
+  assert.match(st.course.detail, /ITE 409 Human Computer Interaction · from Blackboard course page/)
+
+  // later, without the extension: the browser's saved source page is enough, because the course id is remembered
+  const next = writeDownload(dl, 'Week 12.pptx', 'Week 12')
+  const sug2 = await core.handleNewFile({ ...next, sourceUrl: 'https://blackboard.adu.ac.ae/ultra/courses/_90411_1/outline' })
+  assert.equal(sug2.status, 'moved')
+  assert.ok(fs.existsSync(path.join(course, 'LectureMaterials', next.name)))
+  assert.equal(core.extensionStatus().courses, 1)
+  await bridge.close(); core.close()
+})
+
+test('existing course folder without a code is found, renamed to the official name, used, and the rename can be undone', async () => {
+  const { core, docs, events } = makeCore()
+  // the student's own folder, like OneDrive\Documents\HumanComputerInteraction
+  const mine = path.join(docs, 'HumanComputerInteraction')
+  fs.mkdirSync(path.join(mine, 'Assignment'), { recursive: true })
+  fs.writeFileSync(path.join(mine, '5.Chapter 3 - Personas & Scenarios.pptx'), 'x')
+  const own = path.join(docs, 'CSC408 My Distributed Notes') // a different course's code: never renamed
+  fs.mkdirSync(own)
+
+  core.addDownloadHint({ fileName: '[f] Week 11 - Design.pptx', courseId: '_90411_1', courseTitle: 'Human Computer Interaction' })
+  const info = writeDownload(tmp(), '[f] Week 11 - Design.pptx', 'Week 11 Design')
+  const sug = await core.handleNewFile(info)
+
+  const official = path.join(docs, 'ITE409_HumanComputerInteraction')
+  assert.equal(sug.status, 'moved')
+  assert.ok(!fs.existsSync(mine), 'old folder name is gone')
+  assert.ok(fs.existsSync(path.join(official, 'Assignment')), 'existing contents kept')
+  assert.ok(fs.existsSync(path.join(official, '5.Chapter 3 - Personas & Scenarios.pptx')))
+  assert.ok(fs.existsSync(path.join(official, 'LectureMaterials', info.name)), 'file filed inside the renamed folder')
+  assert.ok(fs.existsSync(own))
+  const st = stepsOf(events.flows[events.flows.length - 1])
+  assert.equal(st.courseFolder.detail, 'Renamed “HumanComputerInteraction” → “ITE409_HumanComputerInteraction”')
+
+  const rename = core.activity().find(e => e.type === 'rename')
+  assert.ok(rename)
+  await core.undo(rename.id)
+  assert.ok(fs.existsSync(path.join(mine, 'LectureMaterials', info.name)), 'undo restores the original folder name')
+  core.close()
+})
+
+test('a two-letter acronym folder ("AI") is recognised as the course, renamed and used', async () => {
+  const { core, docs } = makeCore()
+  const mine = path.join(docs, 'AI')
+  fs.mkdirSync(mine); fs.writeFileSync(path.join(mine, 'Week 1 - Introduction and History.pptx'), 'x')
+  fs.mkdirSync(path.join(docs, 'ICT_AI')) // a different thing that only contains "AI": left alone
+  core.addDownloadHint({ fileName: 'Week 4 Supervised learning.pptx', courseId: '_88012_1', courseTitle: 'CSC 406 Artificial Intelligence' })
+  const info = writeDownload(tmp(), 'Week 4 Supervised learning.pptx', 'Supervised learning')
+  const sug = await core.handleNewFile(info)
+  const official = path.join(docs, 'CSC406_ArtificialIntelligence')
+  assert.equal(sug.status, 'moved')
+  assert.ok(!fs.existsSync(mine), 'AI was renamed, not duplicated')
+  assert.ok(fs.existsSync(path.join(official, 'Week 1 - Introduction and History.pptx')), 'existing files kept')
+  assert.ok(fs.existsSync(path.join(official, 'LectureMaterials', info.name)))
+  assert.ok(fs.existsSync(path.join(docs, 'ICT_AI')))
+  core.close()
+})
+
+test('a folder whose name says nothing is found by the course files already inside it', async () => {
+  const { core, docs } = makeCore()
+  const mine = path.join(docs, 'Uni Stuff')
+  fs.mkdirSync(mine)
+  fs.writeFileSync(path.join(mine, 'Week 2 Data Quality and Preprocessing.pptx'), 'x')
+  core.addDownloadHint({ fileName: 'Week 2 Data Quality and Preprocessing (1).pptx', courseId: '_88012_1', courseTitle: 'CSC 406 Artificial Intelligence' })
+  const info = writeDownload(tmp(), 'Week 2 Data Quality and Preprocessing (1).pptx', 'Data quality')
+  const sug = await core.handleNewFile(info)
+  assert.equal(sug.status, 'moved')
+  const official = path.join(docs, 'CSC406_ArtificialIntelligence')
+  assert.ok(fs.existsSync(path.join(official, 'LectureMaterials', info.name)), 'filed in the folder that already had the course\'s file (renamed)')
+  assert.ok(fs.existsSync(path.join(official, 'Week 2 Data Quality and Preprocessing.pptx')))
+  assert.match(sug.primary.reason, /already has this file/)
+
+  // a folder holding several courses is used by code evidence but never renamed
+  const { core: core2, docs: docs2 } = makeCore()
+  const mixed = path.join(docs2, 'Semester Files')
+  fs.mkdirSync(mixed)
+  for (const n of ['CSC406 quiz 1.pdf', 'CSC406 notes.pdf', 'ITE409 report.docx']) fs.writeFileSync(path.join(mixed, n), 'x')
+  core2.addDownloadHint({ fileName: 'Week 9 Search.pptx', courseId: '_88012_1', courseTitle: 'CSC 406 Artificial Intelligence' })
+  const info2 = writeDownload(tmp(), 'Week 9 Search.pptx', 'Search')
+  const sug2 = await core2.handleNewFile(info2)
+  assert.equal(sug2.status, 'moved')
+  assert.ok(fs.existsSync(path.join(mixed, 'LectureMaterials', info2.name)))
+  core.close(); core2.close()
+})
+
+test('no message from the extension for a download: the Blackboard course you had open is used', async () => {
+  const { core, docs } = makeCore()
+  fs.mkdirSync(path.join(docs, 'AI'))
+  core.addCourseHint({ courseId: '_88012_1', courseTitle: 'Artificial Intelligence_102_AD_2025-2026 SPR' }) // the course page is open
+  const info = writeDownload(tmp(), '3. Intelligent Agents.pptx', 'Intelligent agents')
+  const sug = await core.handleNewFile({ ...info, sourceUrl: 'https://blackboard.adu.ac.ae/' })
+  assert.equal(sug.status, 'moved')
+  assert.ok(fs.existsSync(path.join(docs, 'CSC406_ArtificialIntelligence', 'LectureMaterials', info.name)))
+  // ...but not for a file from somewhere else, nor one naming another course
+  const other = writeDownload(tmp(), 'ITE409 Week 2.pptx', 'Personas')
+  const sug2 = await core.handleNewFile({ ...other, sourceUrl: 'https://blackboard.adu.ac.ae/' })
+  assert.equal(sug2.signals.course.code, 'ITE 409')
+  core.close()
+})
+
+test('re-downloading a file you already have: its folder ("AI") tells the course', async () => {
+  const { core, docs } = makeCore()
+  fs.mkdirSync(path.join(docs, 'AI'))
+  fs.writeFileSync(path.join(docs, 'AI', '2. Week3 Chapter 2 - Intelligent Agents - students copy.pptx'), 'old')
+  const info = writeDownload(tmp(), '2. Week3 Chapter 2 - Intelligent Agents - students copy.pptx', 'Intelligent agents')
+  const sug = await core.handleNewFile(info)
+  assert.equal(sug.status, 'moved')
+  assert.equal(sug.signals.course.code, 'CSC 406')
+  assert.ok(fs.existsSync(path.join(docs, 'CSC406_ArtificialIntelligence', 'LectureMaterials', info.name)))
+  core.close()
+})
+
+test('after filing, KoolMate offers to sort the loose files in the course folder; nothing moves until you say yes', async () => {
+  const { core, docs, events } = makeCore()
+  const mine = path.join(docs, 'OperatingSystem')
+  fs.mkdirSync(path.join(mine, 'Assignment'), { recursive: true })
+  const put = (n, ...lines) => fs.writeFileSync(path.join(mine, n), lines.join('\n') || 'x')
+  put('Week 1 - Introduction to OS.pptx'); put('Chapter 3 Processes.pptx')
+  put('Assignment 2 - Scheduling.docx'); put('Lab 4 Threads.pdf'); put('random thoughts.txt', 'hello')
+  fs.mkdirSync(path.join(mine, 'Old')); fs.writeFileSync(path.join(mine, 'Old', 'Lecture 9.pptx'), 'x') // already in a subfolder: left alone
+
+  core.addDownloadHint({ fileName: 'Chapter 5 Memory.pptx', courseId: '_7_1', courseTitle: 'CSC 308 Operating Systems' })
+  const info = writeDownload(tmp(), 'Chapter 5 Memory.pptx', 'Memory management')
+  const sug = await core.handleNewFile(info)
+  assert.equal(sug.status, 'moved')
+  const course = path.join(docs, 'CSC308_OperatingSystems')
+  const flow = events.flows[events.flows.length - 1]
+  const offer = flow.tidy
+  assert.ok(offer, 'the pop-up asks about the other files')
+  assert.equal(offer.count, 4)
+  assert.equal(offer.counts.LectureMaterials, 2)
+  assert.equal(offer.counts.Assignment, 1, 'reuses the student\'s own "Assignment" folder')
+  assert.equal(offer.counts.Labs, 1)
+  assert.equal(offer.unclear, 1)
+  assert.ok(fs.existsSync(path.join(course, 'Chapter 3 Processes.pptx')), 'nothing moved before saying yes')
+
+  const r = await core.applyTidy(offer.id)
+  assert.equal(r.moved, 4)
+  assert.ok(fs.existsSync(path.join(course, 'LectureMaterials', 'Chapter 3 Processes.pptx')))
+  assert.ok(fs.existsSync(path.join(course, 'Assignment', 'Assignment 2 - Scheduling.docx')))
+  assert.ok(fs.existsSync(path.join(course, 'Labs', 'Lab 4 Threads.pdf')))
+  assert.ok(fs.existsSync(path.join(course, 'random thoughts.txt')), 'unclear files stay')
+  assert.ok(fs.existsSync(path.join(course, 'Old', 'Lecture 9.pptx')))
+
+  await core.undoBatch(r.batchId)
+  assert.ok(fs.existsSync(path.join(course, 'Chapter 3 Processes.pptx')), 'Undo all puts them back')
+
+  // asked once per course
+  core.addDownloadHint({ fileName: 'Chapter 6.pptx', courseId: '_7_1', courseTitle: 'CSC 308 Operating Systems' })
+  await core.handleNewFile(writeDownload(tmp(), 'Chapter 6.pptx', 'Deadlocks'))
+  assert.equal(events.flows[events.flows.length - 1].tidy, null)
+  core.close()
+})
+
+test('a Blackboard page heading is never mistaken for the course, nor replaces a known one', async () => {
+  const { core } = makeCore()
+  assert.deepEqual(core.addCourseHint({ courseId: '_91170_1', courseTitle: 'ITE 442 Data Science and Big Data Analytics' }), { code: 'ITE 442', name: 'Data Science and Big Data Analytics' })
+  // an assignment page whose only heading is the assignment title
+  assert.deepEqual(core.addCourseHint({ courseId: '_91170_1', courseTitle: 'Term Project - Report Submission' }), { code: 'ITE 442', name: 'Data Science and Big Data Analytics' })
+  assert.equal(core.addCourseHint({ courseId: '_5_1', courseTitle: 'Term Project - Report Submission' }), null)
+  core.close()
+})
+
+test('the file content decides the type when the name is wrong (named Lecture, actually an activity)', async () => {
+  const { core, docs } = makeCore({ major: SWE })
+  const info = writeDownload(tmp(), 'CSC301_Lecture05.pdf', 'In-Class Activity 3: Build a Heap', ['Work in groups of three', 'Time: 20 minutes', 'Discuss with your group and submit one answer'])
+  const sug = await core.handleNewFile(info)
+  assert.equal(sug.status, 'moved')
+  assert.ok(fs.existsSync(path.join(docs, 'CSC301_DataStructuresAndAlgorithms', 'Activities', info.name)))
+  assert.match(sug.analysis.summary + ' ' + JSON.stringify(sug.signals), /Activities/)
+  core.close()
+})
+
+test('a folder with the student\'s own short name ("Big Data") is recognised as the course, renamed and used', async () => {
+  const { core, docs, events } = makeCore()
+  const mine = path.join(docs, 'Big Data')
+  fs.mkdirSync(mine); fs.writeFileSync(path.join(mine, 'hadoop notes.txt'), 'x')
+  fs.mkdirSync(path.join(docs, 'HCI'))
+  core.addDownloadHint({ fileName: 'Week 3.pdf', courseId: '_2_1', courseTitle: 'Data Science and Big Data Analytics' })
+  const info = writeDownload(tmp(), 'Week 3.pdf', 'Lecture 3: Hadoop and MapReduce', ['Learning outcomes', 'Slides'])
+  const sug = await core.handleNewFile(info)
+  const official = path.join(docs, 'ITE442_DataScienceAndBigDataAnalytics')
+  assert.equal(sug.status, 'moved')
+  assert.ok(!fs.existsSync(mine))
+  assert.ok(fs.existsSync(path.join(official, 'hadoop notes.txt')), 'existing contents kept')
+  assert.ok(fs.existsSync(path.join(official, 'LectureMaterials', info.name)))
+  assert.equal(stepsOf(events.flows[events.flows.length - 1]).courseFolder.detail, 'Renamed “Big Data” → “ITE442_DataScienceAndBigDataAnalytics”')
+
+  // initials work too: "HCI" -> ITE 409 Human Computer Interaction
+  core.addDownloadHint({ fileName: 'Week 12.pptx', courseId: '_90411_1', courseTitle: 'Human Computer Interaction' })
+  const hci = writeDownload(tmp(), 'Week 12.pptx', 'Week 12')
+  await core.handleNewFile(hci)
+  assert.ok(fs.existsSync(path.join(docs, 'ITE409_HumanComputerInteraction', 'LectureMaterials', hci.name)))
+  assert.ok(!fs.existsSync(path.join(docs, 'HCI')))
+  core.close()
+})
+
+test('a task sheet named "Lecture 0" (rules + questions) is filed as an activity; real lecture slides stay lectures', async () => {
+  const { core, docs } = makeCore({ major: SWE })
+  const sheet = writeDownload(tmp(), 'CSC301 - Lecture 0.pdf', 'CSC301 - Lecture 0 - Independent Learning', [
+    'Part 1:', 'Rules:', 'When the question asks you to Google, include a screenshot of the search',
+    'List the concepts you already took in another course', 'Search the definition of each block using any AI tool',
+    'Google the difference between batch and real-time processing', 'What are the benefits of the visualization step?',
+    'Why do you think the visualization step comes last in the flow?', 'Part 2:', 'Use any AI tool to compare the database types'
+  ])
+  const s1 = await core.handleNewFile(sheet)
+  assert.equal(s1.status, 'moved')
+  assert.ok(fs.existsSync(path.join(docs, 'CSC301_DataStructuresAndAlgorithms', 'Activities', sheet.name)), 'task sheet -> Activities')
+
+  const slides = writeDownload(tmp(), 'CSC301 - Lecture 4.pdf', 'Lecture 4: Binary Search Trees', ['Learning outcomes', 'What is a binary search tree?', 'Insertion', 'Deletion', 'Traversal orders', 'Summary'])
+  const s2 = await core.handleNewFile(slides)
+  assert.ok(fs.existsSync(path.join(docs, 'CSC301_DataStructuresAndAlgorithms', 'LectureMaterials', slides.name)), 'slides -> LectureMaterials')
+  core.close()
+})
+
+test('folders named with just the code ("ITE442") or code + short name ("CSC301-Data Structure") are reused and renamed, never duplicated', async () => {
+  const { core, docs, events } = makeCore({ major: SWE })
+  fs.mkdirSync(path.join(docs, 'ITE442')); fs.writeFileSync(path.join(docs, 'ITE442', 'old notes.txt'), 'x')
+  fs.mkdirSync(path.join(docs, 'CSC301-Data Structure', 'Slides'), { recursive: true })
+  fs.writeFileSync(path.join(docs, 'CSC301-Data Structure', 'Slides', 'ch1.pptx'), 'x')
+
+  core.addDownloadHint({ fileName: 'Week 5.pdf', courseId: '_2_1', courseTitle: 'Data Science and Big Data Analytics' })
+  const a = writeDownload(tmp(), 'Week 5.pdf', 'Lecture 5: Spark', ['Learning outcomes', 'Slides'])
+  assert.equal((await core.handleNewFile(a)).status, 'moved')
+  const big = path.join(docs, 'ITE442_DataScienceAndBigDataAnalytics')
+  assert.ok(!fs.existsSync(path.join(docs, 'ITE442')), 'code-only folder renamed, not duplicated')
+  assert.ok(fs.existsSync(path.join(big, 'old notes.txt')))
+  assert.ok(fs.existsSync(path.join(big, 'LectureMaterials', a.name)))
+  assert.equal(stepsOf(events.flows[events.flows.length - 1]).courseFolder.detail, 'Renamed “ITE442” → “ITE442_DataScienceAndBigDataAnalytics”')
+
+  const b = writeDownload(tmp(), 'CSC301_Lecture2.pdf', 'Lecture 2: Linked Lists', ['Learning outcomes'])
+  assert.equal((await core.handleNewFile(b)).status, 'moved')
+  const dsa = path.join(docs, 'CSC301_DataStructuresAndAlgorithms')
+  assert.ok(!fs.existsSync(path.join(docs, 'CSC301-Data Structure')))
+  assert.ok(fs.existsSync(path.join(dsa, 'Slides', 'ch1.pptx')), 'existing contents kept')
+  assert.ok(fs.existsSync(path.join(dsa, 'Slides', b.name)), 'lecture goes into the student\'s own "Slides" folder')
+  const dirs = fs.readdirSync(docs)
+  assert.deepEqual(dirs.filter(d => /ITE442|CSC301/.test(d)).sort(), ['CSC301_DataStructuresAndAlgorithms', 'ITE442_DataScienceAndBigDataAnalytics'])
+  core.close()
+})
+
+test('OCR (Windows): text in a picture is read and used to decide the type', { skip: process.platform !== 'win32' }, async () => {
+  const { readExcerpt } = require('../electron/services/contentReader')
+  const { execFileSync } = require('child_process')
+  const png = path.join(tmp(), 'IMG_0042.png')
+  // draw a slide with text, like a photo of the board or an exported AhaSlides page
+  const ps = `Add-Type -AssemblyName System.Drawing; $b = New-Object System.Drawing.Bitmap 1200, 500; $g = [System.Drawing.Graphics]::FromImage($b); $g.Clear([System.Drawing.Color]::White); $f = New-Object System.Drawing.Font('Arial', 40); $g.DrawString('In-class activity: Kahoot quiz', $f, [System.Drawing.Brushes]::Black, 40, 80); $g.DrawString('Work in groups of three', $f, [System.Drawing.Brushes]::Black, 40, 220); $b.Save('${png.replace(/'/g, "''")}'); $g.Dispose(); $b.Dispose()`
+  execFileSync('powershell.exe', ['-NoProfile', '-Command', ps])
+  const r = await readExcerpt(png)
+  assert.equal(r.ok, true, 'picture text was read')
+  assert.equal(r.ocr, true)
+  assert.match(r.text, /activity/i)
+  const smart = require('../electron/services/smartSort')
+  const a = smart.understand({ file: { name: 'IMG_0042.png' }, content: r, subjects: [{ code: 'ITE 442', name: 'Data Science and Big Data Analytics', keywords: [] }] })
+  assert.equal(a.type, 'Activities')
 })

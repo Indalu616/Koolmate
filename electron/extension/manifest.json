@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "KoolMate for Blackboard",
+  "short_name": "KoolMate",
+  "version": "1.0.0",
+  "description": "Files your Blackboard downloads into the right course folder by telling the KoolMate desktop app which course they came from.",
+  "homepage_url": "https://github.com/Indalu616/Koolmate",
+  "minimum_chrome_version": "110",
+  "permissions": ["downloads", "storage", "alarms"],
+  "host_permissions": [
+    "https://*.blackboard.com/*",
+    "https://blackboard.adu.ac.ae/*",
+    "http://127.0.0.1:47613/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://*.blackboard.com/*", "https://blackboard.adu.ac.ae/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "KoolMate for Blackboard",
+    "default_popup": "popup.html",
+    "default_icon": { "16": "icon-16.png", "32": "icon-32.png" }
+  },
+  "icons": { "16": "icon-16.png", "32": "icon-32.png", "48": "icon-48.png", "128": "icon-128.png" }
+}

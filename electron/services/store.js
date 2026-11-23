@@ -16,6 +16,11 @@ const DEFAULT_SETTINGS = () => {
     excludedFolders: [],
     destinationRoots: [path.join(home, 'Documents')],
     courses: [],
+    university: 'adu',          // bundled Abu Dhabi University catalog; '' turns it off
+    major: '',                  // ADU program name, e.g. "Bachelor of Science in Software Engineering"
+    autoFileCourses: true,      // a download from a recognised course is filed (creating folders) without asking
+    renameCourseFolders: true,  // "HumanComputerInteraction" -> "ITE 409 Human Computer Interaction" when filing into it
+    tidyCourseFolders: true,    // offer (once per course) to sort the loose files already in a course folder
     geminiApiKey: '',
     geminiModel: 'gemini-3-flash-preview',
     aiReadContent: true,
@@ -68,9 +73,10 @@ class JsonFile {
  * @param {{encrypt:(s:string)=>string, decrypt:(s:string)=>string}|null} cipher  optional OS-level secret protection
  *   (Electron safeStorage / Windows DPAPI) for the Gemini API key.
  */
-function createStore(dir, cipher = null) {
+function createStore(dir, cipher = null, defaults = {}) {
   fs.mkdirSync(dir, { recursive: true })
-  const settingsFile = new JsonFile(path.join(dir, 'settings.json'), DEFAULT_SETTINGS)
+  // `defaults` lets the app pass the real Windows/macOS folders (e.g. a OneDrive-redirected Documents)
+  const settingsFile = new JsonFile(path.join(dir, 'settings.json'), () => ({ ...DEFAULT_SETTINGS(), ...defaults }))
   if (cipher && settingsFile.data.geminiApiKeyEnc) {
     try { settingsFile.data.geminiApiKey = cipher.decrypt(settingsFile.data.geminiApiKeyEnc) } catch { settingsFile.data.geminiApiKey = '' }
   }
@@ -108,7 +114,22 @@ function createStore(dir, cipher = null) {
     },
 
     // ---- learned preferences (stays on this machine) ----
-    getLearning: () => learningFile.data,
+    getLearning: () => { learningFile.data.bbCourses = learningFile.data.bbCourses || {}; return learningFile.data },
+    /** Blackboard's internal course id (e.g. "_90411_1") -> the course it is ({code, name}). */
+    learnBlackboardCourse(id, course) {
+      const L = learningFile.data
+      L.bbCourses = L.bbCourses || {}
+      L.bbCourses[id] = { code: course.code || '', name: course.name || '' }
+      learningFile.save()
+    },
+    /** Courses whose loose files KoolMate already offered to sort (asked once per course). */
+    tidyAsked: key => !!(learningFile.data.tidyAsked || {})[key],
+    markTidyAsked(key, answer) {
+      const L = learningFile.data
+      L.tidyAsked = L.tidyAsked || {}
+      L.tidyAsked[key] = { answer, ts: Date.now() }
+      learningFile.save()
+    },
     learn({ course, ext, folder }) {
       const L = learningFile.data
       if (course) L.courseFolders[course.toLowerCase()] = folder

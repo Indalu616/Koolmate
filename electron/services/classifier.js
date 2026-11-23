@@ -11,7 +11,8 @@ const { SKIP_DIR_NAMES, tokenize, tokenizeWithCodes, extOf, isInside, categoryOf
 
 const TYPE_RULES = [
   { type: 'Lectures', words: ['lecture', 'lectures', 'lec', 'lect', 'slides', 'slide', 'chapter', 'ch'] },
-  { type: 'Assignments', words: ['assignment', 'assignments', 'asg', 'assign', 'hw', 'homework', 'coursework', 'worksheet', 'tutorial'] },
+  { type: 'Assignments', words: ['assignment', 'assignments', 'asg', 'assign', 'hw', 'homework', 'coursework'] },
+  { type: 'Activities', words: ['activity', 'activities', 'worksheet', 'exercise', 'exercises', 'inclass', 'tutorial', 'questions', 'casestudy'] },
   { type: 'Labs', words: ['lab', 'labs', 'practical', 'experiment'] },
   { type: 'Exams', words: ['exam', 'exams', 'midterm', 'final', 'quiz', 'quizzes', 'mock', 'revision'] },
   { type: 'Syllabus', words: ['syllabus', 'outline', 'schedule'] },
@@ -22,6 +23,7 @@ const TYPE_RULES = [
 const TYPE_FOLDER_ALIASES = {
   Lectures: ['lecture', 'lectures', 'slides', 'lec'],
   Assignments: ['assignment', 'assignments', 'homework', 'hw', 'coursework'],
+  Activities: ['activity', 'activities', 'worksheets', 'exercises', 'tutorials'],
   Labs: ['lab', 'labs', 'practical'],
   Exams: ['exam', 'exams', 'midterm', 'final', 'quizzes', 'quiz'],
   Syllabus: ['syllabus', 'outline'],
@@ -58,6 +60,7 @@ function detectCourse(text, courses) {
     if (code && compact.includes(code)) return { code: c.code, name: c.name || '', keywords: c.keywords || [], known: true }
   }
   for (const c of courses || []) {
+    if (c.codeOnly) continue
     const names = [c.name, ...(c.keywords || [])].filter(Boolean).map(s => tokenize(s).join(' ')).filter(s => s.length >= 2)
     if (names.some(n => toks.includes(' ' + n + ' '))) return { code: c.code, name: c.name || '', keywords: c.keywords || [], known: true }
   }
@@ -71,6 +74,7 @@ function extractSignals(fileName, { sourceUrl = '', courses = [] } = {}) {
   const source = parseSource(sourceUrl, fileName)
   const text = `${base} ${sourceUrl || ''}`
   const tokens = tokenizeWithCodes(base)
+  if (/case[\s_-]?stud(y|ies)/i.test(base)) tokens.push('casestudy')
   const course = detectCourse(text, courses)
   let type = null
   for (const r of TYPE_RULES) { if (r.words.some(w => tokens.includes(w))) { type = r.type; break } }
@@ -108,6 +112,7 @@ async function buildCatalog(roots, excluded = [], { maxDepth = 4, maxFolders = 4
         pathTokens: tokenizeWithCodes(rel.join(' ')),
         leafTokens: tokenizeWithCodes(rel[rel.length - 1]),
         fileCount: fileNames.length,
+        files: fileNames.slice(0, 300),
         samples: fileNames.slice(0, 25).map(n => ({ tokens: tokenizeWithCodes(n.replace(/\.[^.]+$/, '')), ext: extOf(n) }))
       })
     }
@@ -171,8 +176,23 @@ function scoreFolder(f, sig, learning) {
 
 const toConfidence = s => Math.min(0.98, 1 - Math.exp(-Math.max(0, s) / 4.5))
 
+/**
+ * Folder-name style: words joined, each starting with a capital ("Data Science and Big Data
+ * Analytics" -> "DataScienceAndBigDataAnalytics"). Existing capitals are kept ("IoT", "AI").
+ * Arabic names keep their spaces, since joined Arabic words cannot be read.
+ */
+function joinedName(text) {
+  const s = String(text || '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').trim()
+  if (/[؀-ۿ]/.test(s)) return s.replace(/\s+/g, ' ')
+  return s.split(/[^\p{L}\p{N}]+/u).filter(Boolean).map(w => w[0].toUpperCase() + w.slice(1)).join('')
+}
+const compactCode = code => String(code || '').replace(/[\s_-]+/g, '').toUpperCase()
+
+/** "ITE 442" + "Data Science and Big Data Analytics" -> "ITE442_DataScienceAndBigDataAnalytics" */
 function courseFolderName(course) {
-  return course.name ? `${course.code} ${course.name}`.trim() : course.code
+  const code = compactCode(course.code)
+  const name = joinedName(course.name)
+  return code && name ? `${code}_${name}` : (name || code)
 }
 
 /**
@@ -238,4 +258,4 @@ function suggest({ fileName, sourceUrl = '', courses = [], catalog = [], learnin
   }
 }
 
-module.exports = { suggest, extractSignals, buildCatalog, parseSource, detectCourse, toConfidence, courseFolderName, scoreFolder, jaccardMax, TYPE_RULES, TYPE_FOLDER_ALIASES }
+module.exports = { suggest, extractSignals, buildCatalog, parseSource, detectCourse, toConfidence, courseFolderName, joinedName, scoreFolder, jaccardMax, TYPE_RULES, TYPE_FOLDER_ALIASES }

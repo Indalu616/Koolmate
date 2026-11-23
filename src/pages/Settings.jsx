@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { FolderPlus, Trash2, Plus, Eye, EyeOff, Wand2, CheckCircle2, ShieldCheck, FlaskConical, Folder } from 'lucide-react'
+import { FolderPlus, Trash2, Plus, Eye, EyeOff, Wand2, CheckCircle2, ShieldCheck, FlaskConical, Folder, GraduationCap } from 'lucide-react'
 import { api } from '../lib/bridge'
 import { useApp } from '../state/AppContext'
 import { useProcess } from '../state/Process'
@@ -55,6 +55,83 @@ function CoursesEditor({ courses, onSave }) {
         </div>
       </div>
     </div>
+  )
+}
+
+function UniversitySection() {
+  const { settings, updateSettings, toast } = useApp()
+  const [majors, setMajors] = useState([])
+  useEffect(() => { api.catalog?.majors().then(setMajors).catch(() => setMajors([])) }, [])
+  const colleges = [...new Set(majors.map(m => m.college))]
+  const on = settings.university === 'adu'
+  return (
+    <Card>
+      <CardHeader title="University" action={<Badge tone={on ? 'ok' : 'neutral'} icon={on ? GraduationCap : undefined}>{on ? 'Abu Dhabi University' : 'Off'}</Badge>} />
+      <div className="divide-y divide-line px-5">
+        <Toggle label="Use the ADU course catalog" description="Recognises every ADU course by its code and files it under the official course name"
+          checked={on} onChange={v => updateSettings({ university: v ? 'adu' : '' })} />
+        {on && (
+          <div className="py-4">
+            <label htmlFor="major" className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-subtle">Your major</label>
+            <select id="major" className="field" value={settings.major || ''}
+              onChange={e => { const v = e.target.value; updateSettings({ major: v }).then(() => v && toast('Major saved.', { type: 'success' })) }}>
+              <option value="">Not chosen (course codes only)</option>
+              {colleges.map(c => (
+                <optgroup key={c} label={c}>
+                  {majors.filter(m => m.college === c).map(m => <option key={m.name} value={m.name}>{m.name}</option>)}
+                </optgroup>
+              ))}
+            </select>
+            <p className="mt-1.5 text-[13px] text-muted">With a major chosen, your courses are also recognised by name, e.g. “Data Structures Lab 2.pdf”.</p>
+          </div>
+        )}
+        {on && <Toggle label="Rename my course folders to the official name" description="A folder like “HumanComputerInteraction” becomes “ITE409_HumanComputerInteraction” the first time a file is filed into it. You can undo it in Activity."
+          checked={settings.renameCourseFolders !== false} onChange={v => updateSettings({ renameCourseFolders: v })} />}
+        <Toggle label="Offer to sort the files already in a course folder" description="The first time a download goes into a course folder, KoolMate asks whether to move the loose files there into LectureMaterials, Assignments, Labs and so on. Nothing moves unless you say yes, and you can undo it."
+          checked={settings.tidyCourseFolders !== false} onChange={v => updateSettings({ tidyCourseFolders: v })} />
+        <Toggle label="File course downloads automatically" description="When the course and type are clear, create the course folder and subfolder and move the file. You can undo it."
+          checked={settings.autoFileCourses !== false} onChange={v => updateSettings({ autoFileCourses: v })} />
+      </div>
+    </Card>
+  )
+}
+
+function ExtensionSection() {
+  const [st, setSt] = useState(null)
+  useEffect(() => {
+    const load = () => api.extension?.status().then(setSt).catch(() => setSt(null))
+    load(); const t = setInterval(load, 5000); return () => clearInterval(t)
+  }, [])
+  const connected = !!st?.connected
+  return (
+    <Card>
+      <CardHeader title="Blackboard browser extension"
+        action={<Badge tone={connected ? 'ok' : 'neutral'} icon={connected ? CheckCircle2 : undefined}>{connected ? 'Connected' : 'Not connected'}</Badge>} />
+      <div className="space-y-3 px-5 py-4 text-[13px]">
+        <p className="text-muted">File names like “Week 11 - Design.pptx” don’t say the course. The extension tells KoolMate which Blackboard course you downloaded from, so every file lands in the right course folder.</p>
+        {connected
+          ? <p className="text-ink">Working. {st.courses ? `${st.courses} Blackboard course${st.courses === 1 ? '' : 's'} recognised so far.` : 'Open a course in Blackboard to start.'}</p>
+          : (st?.stores?.edge || st?.stores?.chrome) ? (
+            <div className="flex flex-wrap items-center gap-2">
+              {st.stores.edge && <Button size="sm" variant="primary" onClick={() => api.extension.openStore('edge')}>Add to Edge</Button>}
+              {st.stores.chrome && <Button size="sm" variant={st.stores.edge ? 'secondary' : 'primary'} onClick={() => api.extension.openStore('chrome')}>Add to Chrome</Button>}
+              <span className="text-muted">Then reload your Blackboard tab.</span>
+            </div>
+          ) : (
+            <ol className="list-decimal space-y-1 pl-5 text-ink">
+              <li>In Edge open <span className="font-mono text-xs">edge://extensions</span> (Chrome: <span className="font-mono text-xs">chrome://extensions</span>).</li>
+              <li>Turn on <b>Developer mode</b>.</li>
+              <li>Click <b>Load unpacked</b> and choose the extension folder below.</li>
+              <li>Reload your Blackboard tab.</li>
+            </ol>
+          )}
+        {st?.listening === false && <p className="text-bad">KoolMate couldn’t open its connection for the extension (another copy may be running).</p>}
+        <div className="flex items-center gap-2">
+          <span className="min-w-0 flex-1 truncate rounded-lg border border-line bg-bg px-3 py-2 font-mono text-xs text-ink" title={st?.folder}>{st?.folder || 'Available in the desktop app'}</span>
+          <Button size="sm" icon={Folder} disabled={!st?.folder} onClick={() => api.extension.reveal()}>Show folder</Button>
+        </div>
+      </div>
+    </Card>
   )
 }
 
@@ -160,8 +237,12 @@ export default function Settings() {
         </div>
       </Card>
 
+      <UniversitySection />
+
+      <ExtensionSection />
+
       <Card>
-        <CardHeader title="Courses" />
+        <CardHeader title="Your own courses" />
         <div className="px-5 py-4"><CoursesEditor courses={settings.courses} onSave={c => set({ courses: c }).then(() => toast('Courses saved.', { type: 'success' }))} /></div>
       </Card>
 

@@ -9,7 +9,7 @@ const path = require('path')
 const { Indexer } = require('./indexer')
 const { planQuery, mergeAiPlan } = require('./queryPlanner')
 const { searchFiles } = require('./search')
-const { suggest, buildCatalog, courseFolderName, extractSignals } = require('./classifier')
+const { suggest, buildCatalog, courseFolderName, extractSignals, parseSource } = require('./classifier')
 const { DownloadWatcher, readDownloadSource } = require('./watcher')
 const { executeMove, undoMove, assertSafeDestination } = require('./mover')
 const { planOrganize } = require('./organizer')
@@ -20,13 +20,24 @@ const demo = require('./demo')
 const { createOllama } = require('./ollama')
 const { createStudy } = require('./study')
 const { readSections } = require('./contentReader')
-const { uid, extOf, isInside, isTempName, SKIP_DIR_NAMES } = require('./common')
+const aduCatalog = require('./aduCatalog')
+const { uid, extOf, isInside, isTempName, SKIP_DIR_NAMES, tokenizeWithCodes } = require('./common')
 
 function createCore({ store, hooks = {}, documentsDir }) {
   const noop = () => {}
-  const h = { onSuggestions: noop, onNewSuggestion: noop, onAutoMoved: noop, onIndex: noop, onTask: noop, onStudyStream: noop, onActivity: noop, onWatchError: noop, ...hooks }
+  const h = { onSuggestions: noop, onNewSuggestion: noop, onAutoMoved: noop, onFlow: noop, onIndex: noop, onTask: noop, onStudyStream: noop, onActivity: noop, onWatchError: noop, ...hooks }
 
   const settings = () => store.getSettings()
+  const codeKey = c => String(c || '').toLowerCase().replace(/[\s_-]/g, '')
+  /** The student's own courses first, then the bundled university catalog (unless turned off). */
+  const allCourses = () => {
+    const s = settings()
+    if (s.university !== 'adu') return s.courses
+    const own = new Set(s.courses.map(c => codeKey(c.code)).filter(Boolean))
+    return [...s.courses, ...aduCatalog.subjectsFor(s.major).filter(c => !own.has(codeKey(c.code)))]
+  }
+  /** Courses that may be recognised by name (search, organize): own courses + the student's major. */
+  const nameableCourses = () => allCourses().filter(c => !c.codeOnly)
   const indexer = new Indexer({ getRoots: () => settings().searchRoots, getExcluded: () => settings().excludedFolders })
   const task = (kind, step, pct, detail) => h.onTask({ kind, step, pct, detail })
   indexer.onProgress = s => { h.onIndex(s); if (s.state === 'indexing') task('index', 'scan', null, `${(s.count || 0).toLocaleString()} files`) }
@@ -57,7 +68,7 @@ function createCore({ store, hooks = {}, documentsDir }) {
     if (roots && roots.length) catalog = await buildCatalog(roots.filter(r => { try { return fs.statSync(r).isDirectory() } catch { return false } }), s.excludedFolders)
     else { if (fresh) catalogCache.at = 0; catalog = await getCatalog() }
     const rootList = (roots && roots.length ? roots : s.destinationRoots).map(r => path.resolve(r))
-    return { catalog, subjects: smart.subjectsFromCatalog(catalog, s.courses), roots: rootList, learning: store.getLearning() }
+    return { catalog, subjects: smart.subjectsFromCatalog(catalog, allCourses()), roots: rootList, learning: store.getLearning() }
   }
 
   const needsReading = (file, ctx, sourceUrl) => {
@@ -66,9 +77,90 @@ function createCore({ store, hooks = {}, documentsDir }) {
   }
 
   /** Local, offline understanding + destination. Always available. */
-  function localPlan(file, content, ctx, sourceUrl) {
-    return smart.plan({ file, content, subjects: ctx.subjects, catalog: ctx.catalog, roots: ctx.roots, learning: ctx.learning, sourceUrl })
+  function localPlan(file, content, ctx, sourceUrl, courseHint = null) {
+    return smart.plan({ file, content, subjects: ctx.subjects, catalog: ctx.catalog, roots: ctx.roots, learning: ctx.learning, sourceUrl, courseHint })
   }
+
+  // ------------------------------------------------------------- Blackboard course hints (browser extension)
+
+  const hints = []          // { key, course, courseId, ts } — "this file name came from this course"
+  let extensionSeenAt = 0
+  const HINT_TTL = 30 * 60 * 1000
+  const fileKey = n => String(n || '').toLowerCase().replace(/ \(\d+\)(?=\.[^.]+$)/, '')
+  const bbCourseIdOf = url => { const m = String(url || '').match(/\/courses\/(_\d+_\d+)/) || String(url || '').match(/[?&]course_id=(_\d+_\d+)/); return m ? m[1] : null }
+  const cleanTitle = t => smart.cleanSegment(String(t || '')
+    .replace(/\((fall|spring|summer|winter)[^)]*\)/ig, '').replace(/\b(fall|spring|summer|winter)\s*(20)?\d{2}\b/ig, '')
+    .replace(/[([]?\b[A-Za-z]{3,4}[\s_-]?\d{3}[A-Za-z]?\b[)\]]?/g, '').replace(/\b(section|sec|crn)\s*\w+/ig, '')
+    .replace(/^[\s\-–:|]+|[\s\-–:|]+$/g, ''))
+
+  /** Turn what Blackboard calls a course into the official course (code + name) and remember it. */
+  function resolveBlackboardCourse({ courseId, courseTitle, courseCode }) {
+    const mem = courseId ? store.getLearning().bbCourses[courseId] : null
+    if (!courseTitle && !courseCode) return mem || null
+    const subjects = allCourses()
+    const text = `${courseCode || ''} ${courseTitle || ''}`
+    const m = text.match(/(?<![A-Za-z])([A-Za-z]{3,4})[\s_-]?(\d{3}[A-Za-z]?)(?![\dA-Za-z])/)
+    let hit = m ? subjects.find(s => codeKey(s.code) === codeKey(m[1] + m[2])) : null
+    if (!hit && courseTitle) hit = smart.detectSubject(courseTitle, subjects.map(s => ({ ...s, codeOnly: false })))?.subject
+    const name = cleanTitle(courseTitle)
+    const course = hit ? { code: hit.code, name: hit.name } : { code: m ? `${m[1].toUpperCase()} ${m[2].toUpperCase()}` : '', name }
+    if (!course.code && !course.name) return mem || null
+    // With no course code and no known course, the "title" is often the page's heading (an assignment
+    // like "Term Project - Report Submission"), not the course: never let it replace a known course,
+    // and don't treat it as the course at all; the file itself decides instead.
+    if (!hit && !course.code) return mem?.code ? mem : null
+    if (mem?.code && !course.code) return mem
+    if (courseId && (!mem || mem.code !== course.code || mem.name !== course.name)) store.learnBlackboardCourse(courseId, course)
+    return course
+  }
+
+  // What the extension sends, kept in a small local log (extension.log) to check "why wasn't the
+  // course used?". Only file names and course titles; nothing leaves the computer.
+  function logBridge(kind, h, course) {
+    try {
+      const file = path.join(store.dir || '', 'extension.log')
+      if (!store.dir) return
+      try { if (fs.statSync(file).size > 256 * 1024) fs.renameSync(file, file + '.old') } catch { /* no log yet */ }
+      fs.appendFileSync(file, JSON.stringify({ t: new Date().toISOString(), kind, file: h.fileName || undefined, state: h.state || undefined, courseId: h.courseId, title: h.courseTitle, code: h.courseCode, course: course ? `${course.code} ${course.name}`.trim() : null }) + '\n')
+    } catch { /* logging must never break filing */ }
+  }
+
+  // The Blackboard course the student has open (from the extension), as a fallback when a download's
+  // own message from the extension doesn't arrive.
+  let lastViewed = null
+  const VIEWED_TTL = 3 * 60 * 60 * 1000
+  const noteViewed = course => { if (course?.code) lastViewed = { course, ts: Date.now() } }
+
+  function addCourseHint(h) {
+    extensionSeenAt = Date.now()
+    const course = resolveBlackboardCourse(h)
+    noteViewed(course)
+    logBridge('course', h, course)
+    return course
+  }
+
+  function addDownloadHint(h) {
+    extensionSeenAt = Date.now()
+    const course = resolveBlackboardCourse(h)
+    noteViewed(course)
+    logBridge('download', h, course)
+    const name = h.fileName || path.basename(h.path || '')
+    if (!name || !course) return course
+    hints.push({ key: fileKey(name), course, courseId: h.courseId, ts: Date.now() })
+    while (hints.length > 200 || (hints[0] && Date.now() - hints[0].ts > HINT_TTL)) hints.shift()
+    return course
+  }
+
+  const findHint = name => { const k = fileKey(name); for (let i = hints.length - 1; i >= 0; i--) if (hints[i].key === k && Date.now() - hints[i].ts < HINT_TTL) return hints[i]; return null }
+
+  /** The extension usually reports a download before it finishes; if it is running, give it a moment. */
+  async function waitForHint(name, ms) {
+    const t0 = Date.now()
+    let h = findHint(name)
+    while (!h && Date.now() - t0 < ms) { await new Promise(r => setTimeout(r, 150)); h = findHint(name) }
+    return h
+  }
+  const extensionActive = () => Date.now() - extensionSeenAt < 15 * 60 * 1000
 
   const folderListForAi = ctx => {
     const map = new Map()
@@ -123,22 +215,168 @@ function createCore({ store, hooks = {}, documentsDir }) {
 
   // ------------------------------------------------------------- downloads
 
+  // ------------------------------------------------------------- download flow (live steps)
+
+  /**
+   * A flow is the step-by-step record of what KoolMate did with one download. Each step is
+   * reported only after it has really happened (file read, folder created, file moved), so the
+   * pop-up shows actual progress, not an animation.
+   */
+  function createFlow(info) {
+    const flow = { id: uid(), ts: Date.now(), status: 'running', file: { name: info.name, path: info.path, size: info.size, ext: extOf(info.name) }, steps: [] }
+    const emit = () => h.onFlow(JSON.parse(JSON.stringify(flow)))
+    const step = (key, label, status, detail = '') => {
+      const st = { key, label, status, detail }
+      const i = flow.steps.findIndex(x => x.key === key)
+      if (i >= 0) flow.steps[i] = st; else flow.steps.push(st)
+      emit()
+    }
+    const finish = (status, extra = {}) => { Object.assign(flow, { status }, extra); emit() }
+    return { flow, step, finish }
+  }
+  const flows = new Map() // suggestion id -> flow controller
+
+  const courseLabel = c => [c.code, c.name].filter(Boolean).join(' ')
+  const READABLE = new Set(['pdf', 'doc', 'docx', 'ppt', 'pptx', 'odt', 'odp', 'rtf', 'txt', 'md', 'xlsx', 'ods', 'csv', 'png', 'jpg', 'jpeg', 'bmp', 'tif', 'tiff'])
+  const TYPE_WORD = { Lectures: 'Lecture material', Assignments: 'Assignment', Activities: 'Activity', Labs: 'Lab', Exams: 'Exam', Syllabus: 'Syllabus', Projects: 'Project', Notes: 'Notes', Readings: 'Reading' }
+
+  /** Create the course folder and its subfolder (if missing), reporting each, then move the file. */
+  /**
+   * A course folder the student made themselves ("HumanComputerInteraction") gets the official
+   * name ("ITE 409 Human Computer Interaction") so every course looks the same. Only for ADU
+   * catalog courses, only when the folder name has no course code yet, never for the root,
+   * a semester or a type folder, and never over an existing folder. Recorded so it can be undone.
+   */
+  /**
+   * The same file already sits in one of the student's course folders (downloaded before, filed by
+   * hand): that folder's course is this file's course. Only when the folder points at exactly one course.
+   */
+  async function courseOfSameFile(info) {
+    try {
+      const catalog = await getCatalog()
+      const roots = settings().destinationRoots.map(r => path.resolve(r))
+      const here = path.resolve(path.dirname(info.path))
+      const isCourseLevel = f => roots.includes(path.dirname(f.path)) || smart.isSemesterName(path.basename(path.dirname(f.path)))
+      const byPath = new Map(catalog.map(f => [f.path, f]))
+      const subjects = allCourses().map(s => ({ ...s, codeOnly: false }))
+      for (const f of catalog) {
+        if (f.path === here || !(f.files || []).some(n => smart.sameFileName(n, info.name))) continue
+        let cd = f
+        while (cd && !isCourseLevel(cd)) cd = byPath.get(path.dirname(cd.path))
+        if (!cd || smart.isSemesterName(cd.name) || smart.typeOfName(cd.name)) continue
+        const code = cd.name.match(/(?<![A-Za-z])([A-Za-z]{3,4})[\s_-]?(\d{3}[A-Za-z]?)(?![\dA-Za-z])/)
+        let hits = code ? subjects.filter(s => codeKey(s.code) === codeKey(code[1] + code[2])) : subjects.filter(s => smart.subjectMatchesFolder(s, cd))
+        hits = hits.filter((s, i) => hits.findIndex(x => codeKey(x.code) === codeKey(s.code)) === i)
+        if (hits.length === 1) return { code: hits[0].code, name: hits[0].name, evidence: `your “${cd.name}” folder already has this file` }
+      }
+    } catch { /* fall back to reading the file */ }
+    return null
+  }
+
+  async function holdsOtherCourses(dir, code, depth = 0) {
+    let entries
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }) } catch { return false }
+    for (const e of entries.slice(0, 400)) {
+      const m = e.name.match(/(?<![A-Za-z])([A-Za-z]{3,4})[\s_-]?(\d{3})(?!\d)/)
+      if (m && codeKey(m[1] + m[2]) !== codeKey(code) && aduCatalog.courseTitle(`${m[1].toUpperCase()} ${m[2]}`)) return true
+      if (e.isDirectory() && depth < 2 && await holdsOtherCourses(path.join(dir, e.name), code, depth + 1)) return true
+    }
+    return false
+  }
+
+  async function renameToOfficial(courseDir, course, root) {
+    if (!course?.code || !course.name || settings().renameCourseFolders === false || settings().university !== 'adu') return null
+    if (aduCatalog.courseTitle(course.code) !== course.name) return null
+    const name = path.basename(courseDir)
+    const official = smart.cleanSegment(courseFolderName(course))
+    if (!root || path.resolve(courseDir) === path.resolve(root) || name === official) return null
+    // "ITE442", "ITE 442 Big Data", "CSC301-Data Structure" are the same course in the student's own style:
+    // rename them too. A folder carrying a *different* course code is never touched.
+    const codeInName = name.match(/(?<![A-Za-z])([A-Za-z]{2,4})[\s_-]?(\d{3}[A-Za-z]?)(?![\dA-Za-z])/)
+    if (codeInName && codeKey(codeInName[1] + codeInName[2]) !== codeKey(course.code)) return null
+    if (smart.isSemesterName(name) || smart.typeOfName(name)) return null
+    // a folder picked because of the files inside it ("Uni stuff") may hold other courses too:
+    // rename it only when nothing in it belongs to another course
+    if (!smart.subjectMatchesFolder(course, { leafTokens: tokenizeWithCodes(name) }) && await holdsOtherCourses(courseDir, course.code)) return null
+    const target = path.join(path.dirname(courseDir), official)
+    if (!fs.existsSync(courseDir) || fs.existsSync(target)) return null
+    await fs.promises.rename(courseDir, target)
+    const entry = {
+      id: uid(), ts: Date.now(), type: 'rename', status: 'done', from: courseDir, to: target,
+      fileName: name, folder: path.dirname(courseDir), source: 'auto', course: course.code,
+      reason: `Renamed your “${name}” folder to the official course name`
+    }
+    store.addActivity(entry)
+    invalidateCatalog()
+    h.onActivity(store.listActivity())
+    return target
+  }
+
+  async function fileWithSteps(from, folder, meta, step, roots, course = null) {
+    assertSafeDestination(folder)
+    const hasSub = !!smart.typeOfName(path.basename(folder))
+    let courseDir = hasSub ? path.dirname(folder) : folder
+    const root = roots.find(r => isInside(folder, r))
+    const rel = p => (root ? path.relative(root, p) : path.basename(p)) || path.basename(p)
+    const ensure = async (dir, key, label) => {
+      const existed = fs.existsSync(dir)
+      if (!existed) { step(key, label, 'active', `Creating “${path.basename(dir)}”`); await fs.promises.mkdir(dir, { recursive: true }) }
+      step(key, label, 'done', existed ? `Found “${rel(dir)}”` : `Created “${rel(dir)}”`)
+    }
+    const oldName = path.basename(courseDir)
+    const renamed = await renameToOfficial(courseDir, course, root)
+    if (renamed) {
+      courseDir = renamed
+      folder = hasSub ? path.join(renamed, path.basename(folder)) : renamed
+      step('courseFolder', 'Course folder', 'done', `Renamed “${oldName}” → “${path.basename(renamed)}”`)
+    } else await ensure(courseDir, 'courseFolder', 'Course folder')
+    if (hasSub) await ensure(folder, 'subFolder', 'Subfolder')
+    step('move', 'Moving the file', 'active', path.basename(from))
+    const entry = await moveWithJournal(from, folder, meta)
+    step('move', 'File moved', 'done', `${entry.fileName} → ${rel(folder)}`)
+    return entry
+  }
+
   async function handleNewFile(info) {
     const s = settings()
     if (!fs.existsSync(info.path)) return null
     const sourceUrl = info.sourceUrl ?? await readDownloadSource(info.path)
+    const { flow, step, finish } = createFlow(info)
+    const hint = info.courseHint ? { course: info.courseHint } : await waitForHint(info.name, extensionActive() ? 3000 : 0)
+    const remembered = !hint && bbCourseIdOf(sourceUrl) ? store.getLearning().bbCourses[bbCourseIdOf(sourceUrl)] : null
+    // downloaded from Blackboard but the extension's message for this file is missing: use the course
+    // the student had open, unless the file name names another course
+    const fromBlackboard = /^https?:\/\/([^/]+\.)?(blackboard\.com|blackboard\.adu\.ac\.ae)(\/|$)/i.test(sourceUrl || '')
+    const nameCode = info.name.match(/(?<![A-Za-z])([A-Za-z]{3,4})[\s_-]?(\d{3})(?!\d)/)
+    const viewed = !hint && !remembered && fromBlackboard && lastViewed && Date.now() - lastViewed.ts < VIEWED_TTL &&
+      (!nameCode || codeKey(nameCode[1] + nameCode[2]) === codeKey(lastViewed.course.code)) ? lastViewed.course : null
+    let courseHint = hint ? { ...hint.course, evidence: 'Blackboard course page' } : remembered ? { ...remembered, evidence: 'this Blackboard course (remembered)' }
+      : viewed ? { ...viewed, evidence: 'the Blackboard course you had open' } : null
+    if (!courseHint) courseHint = await courseOfSameFile(info) // re-downloading a file you already filed
+    const from = hint ? 'Blackboard' : parseSource(sourceUrl, info.name).label
+    step('detect', 'Download finished', 'done', from ? `${info.name} · from ${from}` : info.name)
     task('simulate', 'analyze', 75, info.name)
     const file = { path: info.path, name: info.name, size: info.size, mtime: info.mtime || Date.now() }
     let ctx = null; let content = null; let local = null
     const classic = await (async () => {
       const catalog = await getCatalog()
-      return suggest({ fileName: info.name, sourceUrl, courses: s.courses, catalog, learning: store.getLearning(), destinationRoots: s.destinationRoots })
+      return suggest({ fileName: info.name, sourceUrl, courses: allCourses(), catalog, learning: store.getLearning(), destinationRoots: s.destinationRoots })
     })()
     try {
       ctx = await context()
-      content = needsReading(file, ctx, sourceUrl) ? await readExcerpt(file.path) : null
-      local = localPlan(file, content, ctx, sourceUrl)
+      // Documents are always opened: the name alone can be wrong ("Lecture 5" that is really an activity).
+      if (needsReading(file, ctx, sourceUrl) || READABLE.has(extOf(file.name))) {
+        step('read', 'Reading the file', 'active', 'Looking inside for the course and type')
+        content = await readExcerpt(file.path)
+        step('read', 'Read the file', 'done', content?.ok ? (content.ocr ? 'Read the text in its pictures (Windows OCR)' : 'Checked what the file is about') : 'Could not read inside; using the name')
+      } else step('read', 'Checked the file name', 'done', 'This kind of file cannot be read inside')
+      local = localPlan(file, content, ctx, sourceUrl, courseHint)
     } catch (e) { console.error('Smart analysis failed, using basic suggestion:', e) } // a notification must always be shown
+    const a = local?.analysis
+    if (a?.course) step('course', 'Course identified', 'done', `${courseLabel(a.course)}${a.courseEvidence ? ` · from ${a.courseEvidence}` : ''}`)
+    else step('course', 'Course not identified', 'failed', 'No course code or name found')
+    if (a?.type) step('type', 'Material type', 'done', `${TYPE_WORD[a.type] || a.type}${a.typeEvidence ? ` · from ${a.typeEvidence}` : ''}`)
+    else step('type', 'Material type unclear', 'failed', 'Not sure if it is a lecture, lab or assignment')
     const primary = local ? local.primary : classic.primary
     const sug = {
       id: uid(), ts: Date.now(), status: 'pending',
@@ -156,16 +394,29 @@ function createCore({ store, hooks = {}, documentsDir }) {
     }
     indexer.noteAdded({ path: info.path, name: info.name, dir: path.dirname(info.path), ext: sug.file.ext, size: info.size, mtime: info.mtime || Date.now() })
 
-    if (s.autoMove && !sug.needsReview && sug.primary.confidence >= s.autoMoveThreshold) {
+    // A recognised course + material type is filed straight away (creating folders if needed);
+    // anything less certain waits for the student.
+    const roots = ctx?.roots || s.destinationRoots.map(r => path.resolve(r))
+    const courseKnown = !!(a?.course && a.course.known && !a.course.inferred && (a.courseStrength ?? 1) >= 0.5)
+    const autoFile = s.autoFileCourses !== false && courseKnown && !!a.type && s_isUnderRoots(sug.primary.folder, roots)
+    const autoMove = s.autoMove && !sug.needsReview && sug.primary.confidence >= s.autoMoveThreshold
+    if (autoFile || autoMove) {
       try {
-        const entry = await moveWithJournal(info.path, sug.primary.folder, { source: 'auto', course: sug.signals.course?.code || null, reason: sug.primary.reason, confidence: sug.primary.confidence })
+        const entry = await fileWithSteps(info.path, sug.primary.folder, { source: 'auto', course: sug.signals.course?.code || null, reason: sug.primary.reason, confidence: sug.primary.confidence }, step, roots, a?.course)
         sug.status = 'moved'; sug.result = entry
         suggestions.set(sug.id, sug)
+        store.learn({ course: sug.signals.course?.code, ext: sug.file.ext, folder: entry.folder })
+        const tidy = await planTidy(entry, a?.course, step).catch(() => null)
+        finish('done', { entry, tidy })
         h.onAutoMoved(entry, sug)
         return sug
-      } catch { /* fall through to a manual suggestion */ }
+      } catch (e) { step('move', 'Could not move the file', 'failed', e.message) } // fall through to a manual suggestion
     }
 
+    sug.flowId = flow.id
+    flows.set(sug.id, { step, finish })
+    step('decide', 'Waiting for you', 'active', sug.needsReview ? 'Please choose where it goes' : 'Confirm the suggested folder')
+    finish('waiting', { suggestionId: sug.id })
     suggestions.set(sug.id, sug)
     h.onNewSuggestion(sug)
     emitSuggestions()
@@ -199,6 +450,77 @@ function createCore({ store, hooks = {}, documentsDir }) {
     return entry
   }
 
+  // ------------------------------------------------------------- tidy a course folder (asks first)
+
+  const tidyOffers = new Map() // offer id -> { courseDir, course, items }
+  const TIDY_MAX = 150
+
+  /**
+   * After a file is filed into a course folder, look at the loose files the student already had at the
+   * top of that folder ("AI\Week 1.pptx") and work out which subfolder each belongs in, the same way a
+   * download is judged (name + content). Nothing moves here: it becomes a question in the pop-up.
+   * Asked once per course; files already in subfolders, and files whose type is unclear, are left alone.
+   */
+  async function planTidy(entry, course, step = null) {
+    if (!entry || !course?.code || settings().tidyCourseFolders === false) return null
+    const key = codeKey(course.code)
+    if (store.tidyAsked(key)) return null
+    const courseDir = smart.typeOfName(path.basename(entry.folder)) ? path.dirname(entry.folder) : entry.folder
+    let entries
+    try { entries = await fs.promises.readdir(courseDir, { withFileTypes: true }) } catch { return null }
+    const loose = entries.filter(e => e.isFile() && !e.name.startsWith('.') && !isTempName(e.name) && !/^desktop\.ini$/i.test(e.name)).slice(0, TIDY_MAX)
+    if (!loose.length) return null
+    if (step) step('tidy', 'Other files in the folder', 'active', `Looking at ${loose.length} file${loose.length > 1 ? 's' : ''} already in “${path.basename(courseDir)}”`)
+    const typeDirs = entries.filter(e => e.isDirectory()).map(e => e.name)
+    const items = []; const unclear = []
+    for (const [i, e] of loose.entries()) {
+      const p = path.join(courseDir, e.name)
+      let st; try { st = await fs.promises.stat(p) } catch { continue }
+      const content = i < 60 && READABLE.has(extOf(e.name)) ? await readExcerpt(p, { ocr: false }).catch(() => null) : null
+      const a = smart.understand({ file: { name: e.name, size: st.size, mtime: st.mtimeMs }, content, subjects: [], courseHint: course })
+      if (!a.type) { unclear.push(e.name); continue }
+      const folderName = typeDirs.find(n => smart.typeOfName(n) === a.type) || smart.TYPE_DEFAULT_NAME[a.type] || a.type
+      items.push({ from: p, name: e.name, type: a.type, folder: folderName })
+    }
+    if (!items.length) {
+      if (step) step('tidy', 'Other files in the folder', 'done', `${unclear.length} file${unclear.length > 1 ? 's' : ''} left as they are (type unclear)`)
+      return null
+    }
+    const counts = {}
+    for (const it of items) counts[it.folder] = (counts[it.folder] || 0) + 1
+    const offer = { id: uid(), courseDir, course, items, unclear }
+    tidyOffers.set(offer.id, offer)
+    if (step) step('tidy', 'Other files in the folder', 'done', `${items.length} can be sorted into subfolders`)
+    return { id: offer.id, folder: path.basename(courseDir), path: courseDir, count: items.length, counts, unclear: unclear.length,
+      items: items.map(it => ({ name: it.name, folder: it.folder })) }
+  }
+
+  async function applyTidy(id) {
+    const offer = tidyOffers.get(id)
+    if (!offer) throw new Error('This offer is no longer available.')
+    tidyOffers.delete(id)
+    store.markTidyAsked(codeKey(offer.course.code), 'sorted')
+    const batchId = uid()
+    let moved = 0; const failed = []
+    for (const it of offer.items) {
+      try {
+        if (!fs.existsSync(it.from)) continue
+        const target = path.join(offer.courseDir, it.folder)
+        assertSafeDestination(target)
+        await fs.promises.mkdir(target, { recursive: true })
+        await moveWithJournal(it.from, target, { source: 'tidy', batchId, course: offer.course.code, reason: `Sorted inside “${path.basename(offer.courseDir)}”: ${(TYPE_WORD[it.type] || it.type).toLowerCase()}` })
+        moved++
+      } catch (e) { failed.push({ fileName: it.name, error: e.message }) }
+    }
+    return { batchId, moved, failed }
+  }
+
+  function dismissTidy(id) {
+    const offer = tidyOffers.get(id)
+    if (offer) store.markTidyAsked(codeKey(offer.course.code), 'declined')
+    tidyOffers.delete(id)
+  }
+
   async function acceptSuggestion(id, folder) {
     const sug = suggestions.get(id)
     if (!sug || sug.status !== 'pending') throw new Error('This suggestion is no longer available.')
@@ -211,7 +533,17 @@ function createCore({ store, hooks = {}, documentsDir }) {
     })
     task('accept', 'save', 80, null)
     sug.status = 'moved'; sug.result = entry
+    const fc = flows.get(id)
+    if (fc) {
+      fc.step('decide', chosenDifferent ? 'You chose a folder' : 'You confirmed', 'done', path.basename(target))
+      fc.step('move', 'File moved', 'done', `${entry.fileName} → ${path.basename(target)}`)
+      const tidy = !chosenDifferent ? await planTidy(entry, sug.signals.course, fc.step).catch(() => null) : null
+      fc.finish('done', { entry, tidy }); flows.delete(id)
+    }
     store.learn({ course: sug.signals.course?.code, ext: sug.file.ext, folder: path.dirname(entry.to) })
+    // confirming a file from a Blackboard course teaches KoolMate which course that is
+    const bbId = bbCourseIdOf(sug.sourceUrl)
+    if (bbId && !chosenDifferent && sug.signals.course && (sug.signals.course.code || sug.signals.course.name)) store.learnBlackboardCourse(bbId, sug.signals.course)
     emitSuggestions()
     return entry
   }
@@ -219,6 +551,8 @@ function createCore({ store, hooks = {}, documentsDir }) {
   function dismissSuggestion(id) {
     const sug = suggestions.get(id)
     if (sug) { sug.status = 'dismissed'; emitSuggestions() }
+    const fc = flows.get(id)
+    if (fc) { fc.step('decide', 'Left in Downloads', 'done', 'You can file it later from Downloads'); fc.finish('dismissed'); flows.delete(id) }
   }
 
   // ------------------------------------------------------------- search + organize
@@ -227,11 +561,11 @@ function createCore({ store, hooks = {}, documentsDir }) {
     const t0 = Date.now()
     const s = settings()
     task('search', 'understand', 8, text.slice(0, 60))
-    let plan = planQuery(text, { courses: s.courses })
+    let plan = planQuery(text, { courses: nameableCourses() })
     let aiError = null
     if (s.geminiApiKey && text.trim()) {
       try {
-        const ai = await gemini.planQueryAI({ apiKey: s.geminiApiKey, model: s.geminiModel, text, courses: s.courses, today: new Date().toISOString().slice(0, 10) })
+        const ai = await gemini.planQueryAI({ apiKey: s.geminiApiKey, model: s.geminiModel, text, courses: nameableCourses().slice(0, 80), today: new Date().toISOString().slice(0, 10) })
         plan = mergeAiPlan(plan, ai)
       } catch (e) { aiError = e.message }
     }
@@ -254,14 +588,14 @@ function createCore({ store, hooks = {}, documentsDir }) {
     const root = destinationRoot || s.destinationRoots[0]
     if (!root) throw new Error('Choose a destination folder first.')
     assertSafeDestination(root)
-    const plan = planQuery(text || '', { courses: s.courses })
+    const plan = planQuery(text || '', { courses: nameableCourses() })
     const cleaned = String(nameOverride || '').replace(/[\\/:*?"<>|]/g, '').trim()
     const folderName = cleaned || suggestedFolderName(plan, text || '')
     const files = paths.map(p => {
       const f = indexer.files.find(x => x.path === p)
       return f || { path: p, name: path.basename(p), size: 0 }
     })
-    const { base, items } = planOrganize(files, { destinationRoot: root, folderName, courses: s.courses })
+    const { base, items } = planOrganize(files, { destinationRoot: root, folderName, courses: nameableCourses() })
     return { destinationRoot: root, folderName, base, items }
   }
 
@@ -389,6 +723,16 @@ function createCore({ store, hooks = {}, documentsDir }) {
     const entry = store.getActivity(id)
     if (!entry) throw new Error('Activity entry not found.')
     if (!quiet) task('undo', 'restore', 40, entry.fileName)
+    if (entry.type === 'rename') {
+      if (entry.status !== 'done') throw new Error('This rename was already undone.')
+      if (!fs.existsSync(entry.to)) throw new Error('The renamed folder can no longer be found.')
+      if (fs.existsSync(entry.from)) throw new Error(`A folder called “${path.basename(entry.from)}” already exists.`)
+      await fs.promises.rename(entry.to, entry.from)
+      store.updateActivity(id, { status: 'undone', undoneAt: Date.now() })
+      invalidateCatalog(); indexer.build().catch(() => {})
+      h.onActivity(store.listActivity())
+      return { restoredTo: entry.from }
+    }
     const r = await undoMove(entry)
     store.updateActivity(id, { status: 'undone', undoneAt: Date.now() })
     indexer.noteMoved(entry.to, r.restoredTo)
@@ -489,8 +833,12 @@ function createCore({ store, hooks = {}, documentsDir }) {
     start, close: () => watcher.close(),
     settings, updateSettings,
     search, organizePreview, organizeExecute, sortScan, sortExecute,
-    listSuggestions, acceptSuggestion, dismissSuggestion, handleNewFile,
+    listSuggestions, acceptSuggestion, dismissSuggestion, handleNewFile, applyTidy, dismissTidy,
     undo, undoBatch, activity: () => store.listActivity(),
+    majors: () => aduCatalog.majors(),
+    addDownloadHint, addCourseHint,
+    noteExtension: () => { extensionSeenAt = Date.now() },
+    extensionStatus: () => ({ connected: extensionActive(), lastSeen: extensionSeenAt || null, courses: Object.keys(store.getLearning().bbCourses).length }),
     rebuildIndex: () => indexer.build(), indexStatus: () => indexer.status,
     watching: () => watcher.active, syncWatcher,
     loadDemo, simulateDownload,

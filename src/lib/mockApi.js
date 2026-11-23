@@ -37,6 +37,7 @@ const BASE_SETTINGS = {
     { code: 'CSC408', name: 'Distributed Systems', keywords: ['ds'] },
     { code: 'CSC302', name: 'Database Management', keywords: ['db', 'dbms'] }
   ],
+  university: 'adu', major: 'Bachelor of Science in Software Engineering', autoFileCourses: true, tidyCourseFolders: true,
   geminiApiKey: '', geminiModel: 'gemini-3-flash-preview', autoMove: false, autoMoveThreshold: 0.9,
   showPopup: true, nativeNotifications: true, runInBackground: true, paused: false, theme: 'system', demoLoaded: true, demoRoot: '/Users/demo/Documents/KoolMate Demo'
 }
@@ -88,6 +89,7 @@ export function createMockApi() {
   let activity = ACTIVITY()
   const listeners = {}
   const emit = (ev, p) => (listeners[ev] || []).forEach(cb => cb(p))
+  if (typeof window !== 'undefined') window.__koolmateMock = { emit } // browser preview only: lets screenshots drive the pop-up
   const wait = ms => new Promise(r => setTimeout(r, ms))
   const task = async (kind, steps, ms = 420) => {
     for (let i = 0; i < steps.length; i++) { emit('task:progress', { kind, step: steps[i][0], pct: Math.round(((i + 1) / (steps.length + 1)) * 100), detail: steps[i][1] }); await wait(ms) }
@@ -173,6 +175,10 @@ export function createMockApi() {
       }),
       execute: async ({ items }) => { await task('organize', [['prepare', `${items.length} files`], ...items.map((i, n) => ['move', `${i.fileName} (${n + 1}/${items.length})`]), ['save', null]], 450); return { batchId: 'bx', moved: items.length, failed: [] } }
     },
+    tidy: {
+      apply: async () => ({ batchId: 'tidy-demo', moved: 9, failed: [] }),
+      dismiss: async () => {}
+    },
     sort: {
       scan: async ({ folder }) => {
         await task('sort', [['scan', '6 files · 14 folders'], ['read', 'scan_0042.pdf (1/6)'], ['read', 'untitled.txt (4/6)'], ['understand', 'Document1.pdf (3/6)'], ['understand', 'WhatsApp Document (6/6)'], ['plan', null]], 480)
@@ -194,6 +200,18 @@ export function createMockApi() {
       list: async () => activity,
       undo: async id => { await task('undo', [['restore', null]], 500); activity = activity.map(a => a.id === id ? { ...a, status: 'undone' } : a); emit('activity:changed', activity); return {} },
       undoBatch: async bid => { await task('undo', [['restore', '1/2'], ['restore', '2/2']], 450); activity = activity.map(a => a.batchId === bid && a.status === 'done' ? { ...a, status: 'undone' } : a); emit('activity:changed', activity); return { restored: 2, errors: [] } }
+    },
+    extension: {
+      status: async () => ({ connected: false, lastSeen: null, courses: 0, listening: true, folder: 'C:\\Program Files\\KoolMate\\resources\\app.asar.unpacked\\electron\\extension' }),
+      reveal: async () => {}
+    },
+    catalog: {
+      majors: async () => [
+        { name: 'Bachelor of Science in Software Engineering', college: 'College of Engineering', courses: 58 },
+        { name: 'Bachelor of Science in Information Technology', college: 'College of Engineering', courses: 59 },
+        { name: 'Bachelor of Business Administration', college: 'College of Business', courses: 40 },
+        { name: 'Bachelor of Science in Public Health', college: 'College of Health Sciences', courses: 37 }
+      ]
     },
     demo: { load: async () => { await task('demo', [['files', 'Sample course files'], ['settings', null], ['index', null]], 600); return { root: settings.demoRoot } }, simulate: async () => { await task('simulate', [['create', null], ['detect', null], ['analyze', 'CSC408_Lecture07.pdf']], 600); suggestions = [...SUGGESTIONS().slice(0, 1).map(s => ({ ...s, id: 'sim' + Date.now(), ts: Date.now() })), ...suggestions]; emit('suggestions:changed', suggestions.filter(s => s.status === 'pending')); return 'sim' } },
     ai: { test: async () => { await task('ai', [['connect', 'gemini-3-flash-preview'], ['verify', null]], 600); return { ok: true } } },

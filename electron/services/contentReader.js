@@ -9,6 +9,7 @@
 const fs = require('fs')
 const zlib = require('zlib')
 const { extOf } = require('./common')
+const { ocrText, OCR_EXT } = require('./ocr')
 
 const TEXT_EXT = new Set(['txt', 'md', 'markdown', 'csv', 'tsv', 'json', 'log', 'tex', 'html', 'htm', 'xml', 'yml', 'yaml', 'ini', 'rtf',
   'js', 'ts', 'py', 'java', 'c', 'cpp', 'h', 'cs', 'go', 'rs', 'sql', 'sh', 'ipynb', 'css'])
@@ -90,12 +91,18 @@ async function readZipXml(file, ext, maxChars) {
 /**
  * @returns {{ ok: boolean, kind: string, text: string, reason?: string }}
  */
-async function readExcerpt(file, { maxChars = 4000 } = {}) {
+async function readExcerpt(file, { maxChars = 4000, ocr = true } = {}) {
   const ext = extOf(file)
+  // pictures and image-only PDFs: read the text in the images with Windows' built-in OCR
+  const tryOcr = async kind => {
+    if (!ocr || !OCR_EXT.has(ext)) return null
+    const t = squash(await ocrText(file, { pages: 2 })).slice(0, maxChars)
+    return t.length >= 20 ? { ok: true, kind, text: t, ocr: true } : null
+  }
   try {
     const st = await fs.promises.stat(file)
     if (!st.isFile()) return { ok: false, kind: 'other', text: '', reason: 'not a file' }
-    if (IMAGE_EXT.has(ext)) return { ok: false, kind: 'image', text: '', reason: 'image' }
+    if (IMAGE_EXT.has(ext)) return (st.size < 25_000_000 && await tryOcr('image')) || { ok: false, kind: 'image', text: '', reason: 'image' }
     if (st.size > MAX_READ_BYTES) return { ok: false, kind: 'large', text: '', reason: 'too large to read' }
     let text = ''
     let kind = ext
@@ -108,6 +115,7 @@ async function readExcerpt(file, { maxChars = 4000 } = {}) {
       if (ext === 'rtf') text = text.replace(/\\par[d]?/g, '\n').replace(/\{\\\*[^}]*\}/g, '').replace(/\\[a-z]+-?\d* ?/gi, '').replace(/[{}]/g, '')
     } else return { ok: false, kind: 'binary', text: '', reason: 'unsupported type' }
     text = squash(text).slice(0, maxChars)
+    if (text.length < 12 && ext === 'pdf') { const r = await tryOcr(kind); if (r) return r }
     return text.length >= 12 ? { ok: true, kind, text } : { ok: false, kind, text, reason: 'no readable text (scanned or empty?)' }
   } catch (e) {
     return { ok: false, kind: ext, text: '', reason: e.message }

@@ -4,6 +4,13 @@ const path = require('path')
 const fs = require('fs')
 const { createStore } = require('./services/store')
 const { createCore } = require('./services/core')
+const { createBridgeServer } = require('./services/bridgeServer')
+const EXTENSION_LINKS = require('./extensionLinks')
+
+// The browser extension ships inside the app; Edge/Chrome need it as a plain folder, not inside app.asar.
+const EXTENSION_DIR = path.join(__dirname, 'extension').replace(`app.asar${path.sep}`, `app.asar.unpacked${path.sep}`)
+let bridge = null
+let bridgePort = null
 
 const isDev = !!process.env.KOOLMATE_DEV
 const ICON = path.join(__dirname, 'assets', 'icon.png')
@@ -22,6 +29,7 @@ let popupTimer = null
 let tray = null
 let quitting = false
 let core = null
+const shownFlows = new Set()
 
 // ---------------------------------------------------------------------------- windows
 
@@ -189,6 +197,8 @@ function registerIpc(refreshTray) {
   handle('suggestions:list', () => core.listSuggestions())
   handle('suggestions:accept', async (id, folder) => { const e = await core.acceptSuggestion(id, folder); refreshTray(); return e })
   handle('suggestions:dismiss', id => { core.dismissSuggestion(id); refreshTray() })
+  handle('tidy:apply', id => core.applyTidy(id))
+  handle('tidy:dismiss', id => core.dismissTidy(id))
   handle('organize:preview', req => core.organizePreview(req))
   handle('organize:execute', req => core.organizeExecute(req))
   handle('sort:scan', req => core.sortScan(req || {}))
@@ -196,6 +206,14 @@ function registerIpc(refreshTray) {
   handle('activity:list', () => core.activity())
   handle('activity:undo', id => core.undo(id))
   handle('activity:undo-batch', id => core.undoBatch(id))
+  handle('catalog:majors', () => core.majors())
+  handle('extension:status', () => ({ ...core.extensionStatus(), listening: !!bridgePort, folder: EXTENSION_DIR, stores: { edge: !!EXTENSION_LINKS.edge, chrome: !!EXTENSION_LINKS.chrome } }))
+  handle('extension:open-store', which => {
+    const url = EXTENSION_LINKS[which === 'chrome' ? 'chrome' : 'edge']
+    if (!url || !/^https:\/\/(microsoftedge\.microsoft\.com|chromewebstore\.google\.com)\//.test(url)) throw new Error('This store link is not available yet.')
+    return shell.openExternal(url)
+  })
+  handle('extension:reveal', () => { shell.showItemInFolder(path.join(EXTENSION_DIR, 'manifest.json')) })
   handle('demo:load', () => { const d = core.loadDemo(); broadcast('settings:changed', publicSettings(core.settings())); return { root: d.root, sortFolder: d.sortFolder } })
   handle('demo:simulate', () => core.simulateDownload())
   handle('ai:test', async (key, model) => {
@@ -213,7 +231,7 @@ app.on('second-instance', () => showMain('/'))
 app.on('before-quit', () => { quitting = true })
 app.on('activate', () => showMain('/')) // macOS: clicking the Dock icon reopens the window
 app.on('window-all-closed', () => { /* keep running in the tray */ })
-app.on('will-quit', () => core?.close())
+app.on('will-quit', () => { core?.close(); bridge?.close() })
 
 app.whenReady().then(() => {
   // Windows/Linux: no menu bar. macOS needs a minimal menu or Cmd+C/V/Q stop working.
@@ -225,19 +243,30 @@ app.whenReady().then(() => {
   const cipher = safeStorage.isEncryptionAvailable()
     ? { encrypt: v => safeStorage.encryptString(v).toString('base64'), decrypt: v => safeStorage.decryptString(Buffer.from(v, 'base64')) }
     : null
-  const store = createStore(path.join(app.getPath('userData'), 'data'), cipher)
+  // Use the folders Windows/macOS actually use: Documents is often moved into OneDrive.
+  const store = createStore(path.join(app.getPath('userData'), 'data'), cipher, {
+    watchedFolders: [app.getPath('downloads')],
+    destinationRoots: [app.getPath('documents')]
+  })
   let refreshTray = () => {}
   core = createCore({
     store, documentsDir: app.getPath('documents'),
     hooks: {
       onSuggestions: list => { broadcast('suggestions:changed', list); refreshTray() },
+      // The pop-up opens on a download's first real step and then follows it live.
+      onFlow: flow => {
+        if (!shownFlows.has(flow.id)) {
+          shownFlows.add(flow.id)
+          if (shownFlows.size > 200) shownFlows.clear()
+          showPopup({ kind: 'flow', flow })
+        } else broadcast('flow:update', flow)
+      },
       onNewSuggestion: sug => {
-        showPopup({ kind: 'suggestion', id: sug.id })
+        if (!sug.flowId) showPopup({ kind: 'suggestion', id: sug.id })
         const dest = path.basename(sug.primary.folder)
         nativeNotify('New download detected', `${sug.file.name} → ${dest}`, '/downloads')
       },
-      onAutoMoved: (entry) => {
-        showPopup({ kind: 'moved', entry })
+      onAutoMoved: entry => { // the flow pop-up already shows the result
         nativeNotify('File organized automatically', `${entry.fileName} → ${path.basename(entry.folder)}`, '/activity')
       },
       onIndex: s => send(mainWindow, 'index:progress', s),
@@ -251,4 +280,11 @@ app.whenReady().then(() => {
   refreshTray = buildTray()
   createMainWindow()
   core.start()
+  bridge = createBridgeServer({
+    version: app.getVersion(),
+    onPing: () => core.noteExtension(),
+    onCourse: hint => core.addCourseHint(hint),
+    onDownload: hint => core.addDownloadHint(hint)
+  })
+  bridge.listen().then(port => { bridgePort = port; if (!port) console.error('KoolMate: browser-extension port is busy; extension hints are off') })
 })

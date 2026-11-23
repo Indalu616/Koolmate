@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font: 13px/1.45 system-ui, sans-serif; margin: 0; width: 280px; background: #16120e; color: #f2ece4; }
+    header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid #2c251d; font-weight: 600; }
+    header img { width: 18px; height: 18px; border-radius: 4px; }
+    section { padding: 10px 12px; }
+    .row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #8a8178; flex: none; }
+    .ok .dot { background: #4ade80; } .bad .dot { background: #f87171; }
+    .label { color: #a39a90; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin: 10px 0 2px; }
+    .course { font-weight: 600; } .muted { color: #a39a90; }
+  </style>
+</head>
+<body>
+  <header><img src="icon-32.png" alt="">KoolMate for Blackboard</header>
+  <section>
+    <div id="app" class="row"><span class="dot"></span><span>Checking the KoolMate app…</span></div>
+    <div class="label">Last Blackboard course</div>
+    <div id="course" class="muted">Open a course in Blackboard</div>
+    <p class="muted" style="margin:10px 0 0">Downloads from a Blackboard course are sent to KoolMate with the course name, so they are filed in the right folder.</p>
+    <p id="getapp" class="muted" style="margin:8px 0 0;display:none">Needs the free KoolMate desktop app: <a href="https://github.com/Indalu616/Koolmate/releases" target="_blank" style="color:#f5b453">download it here</a>.</p>
+  </section>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -45,19 +45,20 @@ export default function Activity() {
     const src = SOURCE[a.source] || { label: 'Moved', tone: 'neutral' }
     return (
       <div className={`flex items-center gap-4 px-5 py-3.5 ${nested ? 'pl-12' : ''}`}>
-        <FileTile ext={a.fileName.split('.').pop()} />
+        <FileTile ext={a.type === 'rename' ? 'folder' : a.fileName.split('.').pop()} />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="truncate text-sm font-medium text-ink" title={a.fileName}>{a.fileName}</span>
             <Badge tone={src.tone}>{src.label}</Badge>
+            {a.type === 'rename' && <Badge tone="accent">Folder renamed</Badge>}
             {a.status === 'undone' && <Badge tone="warn">Undone</Badge>}
             {a.createdFolder && <Badge>New folder</Badge>}
             {a.renamedOnConflict && <Badge tone="warn">Renamed copy</Badge>}
           </div>
           <div className="mt-1 flex min-w-0 items-center gap-2 text-xs text-subtle">
-            <span className="truncate" title={a.from}>{shortPath(a.from.replace(/[\\/][^\\/]*$/, ''), 2)}</span>
+            <span className="truncate" title={a.from}>{a.type === 'rename' ? shortPath(a.from, 2) : shortPath(a.from.replace(/[\\/][^\\/]*$/, ''), 2)}</span>
             <ArrowRight size={12} className="shrink-0" />
-            <span className="truncate font-medium text-muted" title={a.folder}>{shortPath(a.folder, 3)}</span>
+            <span className="truncate font-medium text-muted" title={a.type === 'rename' ? a.to : a.folder}>{shortPath(a.type === 'rename' ? a.to : a.folder, 3)}</span>
           </div>
         </div>
         <span className="hidden shrink-0 text-xs text-muted sm:block">{timeAgo(a.ts)}</span>
