@@ -18,8 +18,8 @@ jobs:
             name: windows
             script: dist
             files: |
-              release/KoolMate-Setup-*.exe
-              release/KoolMate-Portable-*.exe
+              release/KoolMate-Setup.exe
+              release/KoolMate-Portable.exe
               release/KoolMate-*-win-x64.zip
           - os: macos-latest
             name: macos

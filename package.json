@@ -1,7 +1,7 @@
 {
   "name": "koolmate",
   "productName": "KoolMate",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "KoolMate \u2014 AI file assistant. Find any file by describing it and file new downloads where they belong.",
   "author": "KoolMate Team",
   "license": "MIT",
@@ -91,7 +91,7 @@
       "allowToChangeInstallationDirectory": true,
       "shortcutName": "KoolMate",
       "uninstallDisplayName": "KoolMate",
-      "artifactName": "KoolMate-Setup-${version}.${ext}"
+      "artifactName": "KoolMate-Setup.${ext}"
     },
     "mac": {
       "target": [
@@ -127,7 +127,7 @@
       "category": "Utility"
     },
     "portable": {
-      "artifactName": "KoolMate-Portable-${version}.${ext}"
+      "artifactName": "KoolMate-Portable.${ext}"
     },
     "dmg": {
       "title": "KoolMate ${version}",
